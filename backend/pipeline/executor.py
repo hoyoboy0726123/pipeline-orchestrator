@@ -552,7 +552,26 @@ async def execute_step_with_skill(
     input_paths = [po["path"] for po in (prev_outputs or []) if po.get("path")]
     if pipeline_id:
         try:
-            from pipeline.recipe import match_recipe, save_recipe, mark_recipe_failed
+            from pipeline.recipe import match_recipe, save_recipe, mark_recipe_failed, load_recipe as _load_recipe
+            # Debug: 先載入 recipe 看詳細匹配狀況
+            _raw = _load_recipe(pipeline_id, step_name)
+            if _raw:
+                from pipeline.recipe import _sha1 as _recipe_sha1, _fingerprint_input as _recipe_fp
+                _cur_hash = _recipe_sha1(task_description)
+                _cur_fps = {p: _recipe_fp(p) for p in input_paths}
+                if _raw.disabled:
+                    logger.info(f"[{step_name}] 📖 Recipe 存在但已停用")
+                elif _raw.task_hash != _cur_hash:
+                    logger.info(f"[{step_name}] 📖 Recipe 存在但 task_hash 不符（saved={_raw.task_hash}, current={_cur_hash}）")
+                elif _cur_fps != _raw.input_fingerprints:
+                    logger.info(f"[{step_name}] 📖 Recipe 存在但輸入指紋不符")
+                    for k in set(list(_cur_fps.keys()) + list(_raw.input_fingerprints.keys())):
+                        sv = _raw.input_fingerprints.get(k, '(無)')
+                        cv = _cur_fps.get(k, '(無)')
+                        if sv != cv:
+                            logger.info(f"[{step_name}]   {k}: saved={sv} → current={cv}")
+            else:
+                logger.debug(f"[{step_name}] 📖 無 Recipe 紀錄")
             cached = match_recipe(pipeline_id, step_name, task_description, input_paths)
             if cached:
                 logger.info(
@@ -574,7 +593,7 @@ async def execute_step_with_skill(
                     save_recipe(pipeline_id, step_name, task_description, input_paths,
                                 cached.code, output_path, runtime)
                     logger.info(f"[{step_name}] ✅ Recipe 重跑成功（{runtime:.1f}s）")
-                    return ExecResult(exit_code=0, stdout=tool_result, stderr="")
+                    return ExecResult(exit_code=0, stdout=tool_result, stderr="__RECIPE_HIT__")
                 else:
                     logger.warning(f"[{step_name}] Recipe 重跑失敗，改用 LLM 重新學習。輸出：{tool_result[:300]}")
                     mark_recipe_failed(pipeline_id, step_name)

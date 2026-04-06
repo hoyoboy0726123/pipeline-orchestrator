@@ -136,6 +136,14 @@ async def delete_one_recipe(pipeline_name: str, step_name: str):
     return {"deleted": ok}
 
 
+@app.get("/recipes/status/{pipeline_name}")
+async def get_recipe_status(pipeline_name: str, steps: str = ""):
+    """查詢 pipeline 的 recipe 覆蓋狀態。steps 以逗號分隔的 skill step 名稱。"""
+    from pipeline.recipe import get_pipeline_recipe_status
+    step_names = [s.strip() for s in steps.split(",") if s.strip()] if steps else []
+    return get_pipeline_recipe_status(pipeline_name, step_names)
+
+
 @app.delete("/recipes/{pipeline_name}")
 async def delete_pipeline_all_recipes(pipeline_name: str):
     from pipeline.recipe import delete_pipeline_recipes
@@ -185,6 +193,7 @@ async def fs_check_venv(dir: str):
 class PipelineRunRequest(BaseModel):
     yaml_content: str
     validate: bool = True
+    use_recipe: bool = False  # True = 快速模式：recipe 命中時跳過 LLM 驗證
 
 
 class PipelineDecisionRequest(BaseModel):
@@ -214,17 +223,19 @@ async def start_pipeline(req: PipelineRunRequest):
     # 先建立 run 並存入 store，確保前端立刻能查詢
     run_id = str(uuid.uuid4())[:12]
     _, log_path = create_run_logger(run_id, config.name)
+    config_d = config.model_dump()
+    config_d["_use_recipe"] = req.use_recipe  # 傳遞快速模式旗標
     run = PRun(
         run_id=run_id,
         pipeline_name=config.name,
-        config_dict=config.model_dump(),
+        config_dict=config_d,
         telegram_chat_id=0,
         log_path=log_path,
     )
     get_store().save(run)
 
     # 背景執行（runner 看到已存在的 run_id 會恢復執行）
-    asyncio.create_task(run_pipeline(config.model_dump(), chat_id=0, run_id=run_id))
+    asyncio.create_task(run_pipeline(config_d, chat_id=0, run_id=run_id))
 
     return {"run_id": run_id, "message": f"Pipeline '{config.name}' 已啟動"}
 

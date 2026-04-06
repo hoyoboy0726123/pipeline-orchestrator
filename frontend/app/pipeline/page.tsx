@@ -10,7 +10,7 @@ import {
 import '@xyflow/react/dist/style.css'
 
 import {
-  Play, Clock, Code2, Plus, Sparkles,
+  Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap,
   Loader2, CheckCircle2, XCircle, Workflow, Terminal, X,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -30,6 +30,7 @@ import { useWorkflowStore } from './_store'
 import {
   startPipeline, getPipelineRun, resumePipeline,
   createPipelineSchedule, getPipelineLog,
+  getRecipeStatus, type RecipeStatus,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
 import { useRunStatusStore } from './_runStatus'
@@ -122,6 +123,74 @@ function ScheduleDialog({ yaml, pipelineName, onClose }: { yaml: string; pipelin
   )
 }
 
+// ── Run Dialog（選擇快速/完整模式）──────────────────────────────────────────────
+function RunDialog({
+  recipeStatus, onRun, onClose,
+}: {
+  recipeStatus: RecipeStatus | null
+  onRun: (useRecipe: boolean) => void
+  onClose: () => void
+}) {
+  const hasRecipe = recipeStatus?.has_recipes ?? false
+  const covered = recipeStatus?.covered_steps ?? 0
+  const total = recipeStatus?.total_skill_steps ?? 0
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-[420px] overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 px-5 py-4 border-b">
+          <Play className="w-4 h-4 text-indigo-600" />
+          <span className="font-semibold text-gray-800">執行 Pipeline</span>
+        </div>
+        <div className="p-5 space-y-3">
+          {/* 快速模式 */}
+          <button
+            onClick={() => onRun(true)}
+            disabled={!hasRecipe}
+            className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
+              hasRecipe
+                ? 'border-emerald-200 hover:border-emerald-400 hover:bg-emerald-50 cursor-pointer'
+                : 'border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed'
+            }`}
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <Zap className="w-4 h-4 text-amber-500" />
+              <span className="font-semibold text-sm text-gray-900">快速模式（Recipe）</span>
+              {hasRecipe && (
+                <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-medium">
+                  {covered}/{total} 步驟已快取
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              {hasRecipe
+                ? '使用上次成功的程式碼直接執行，僅做檔案存在 + 大小檢查，數秒完成。'
+                : '尚無 Recipe 紀錄。請先用完整模式跑一次成功。'}
+            </p>
+          </button>
+
+          {/* 完整模式 */}
+          <button
+            onClick={() => onRun(false)}
+            className="w-full text-left p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all cursor-pointer"
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <Sparkles className="w-4 h-4 text-indigo-500" />
+              <span className="font-semibold text-sm text-gray-900">完整模式（LLM 驗證）</span>
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              AI 重新生成程式碼 + 完整驗證輸出內容。較慢但會徹底檢查結果正確性。
+            </p>
+          </button>
+        </div>
+        <div className="px-5 py-3 border-t bg-gray-50 flex justify-end">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">取消</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── YAML Panel（Terminal 風格）─────────────────────────────────────────────────
 function YamlPanel({ yaml, onImport, onClose }: { yaml: string; onImport: (y: string) => void; onClose: () => void }) {
   const [draft, setDraft] = useState(yaml)
@@ -185,6 +254,8 @@ export default function PipelinePage() {
   const [validate, setValidate]   = useState(false)
   const [showYaml, setShowYaml]   = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
+  const [showRunDialog, setShowRunDialog] = useState(false)
+  const [recipeStatus, setRecipeStatus]   = useState<RecipeStatus | null>(null)
   const [running, setRunning]     = useState(false)
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'success' | 'failed' | 'awaiting'>('idle')
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
@@ -238,6 +309,31 @@ export default function PipelinePage() {
     if (savingRef.current || !activeId) return
     updateWorkflow(activeId, { name: pipelineName })
   }, [pipelineName]) // eslint-disable-line
+
+  // 載入 recipe 狀態（標記哪些 skill step 有快取）
+  const recipeLoadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (recipeLoadTimer.current) clearTimeout(recipeLoadTimer.current)
+    recipeLoadTimer.current = setTimeout(async () => {
+      const steps = flowToSteps(nodes as AppNode[], edges)
+      const skillSteps = steps.filter(s => s.skillMode).map(s => s.name)
+      if (skillSteps.length === 0) {
+        useRunStatusStore.getState().setRecipeSteps({})
+        return
+      }
+      try {
+        const status = await getRecipeStatus(pipelineName, skillSteps)
+        const map: Record<string, boolean> = {}
+        for (const [name, info] of Object.entries(status.steps)) {
+          if (info.has_recipe) map[name] = true
+        }
+        useRunStatusStore.getState().setRecipeSteps(map)
+      } catch {
+        // 忽略錯誤
+      }
+    }, 1000)
+    return () => { if (recipeLoadTimer.current) clearTimeout(recipeLoadTimer.current) }
+  }, [nodes, edges, pipelineName]) // eslint-disable-line
 
   // 同步 validate 到 store
   useEffect(() => {
@@ -406,25 +502,40 @@ export default function PipelinePage() {
   }, [setNodes, setEdges])
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
-  const handleRun = async () => {
+  const handleRunClick = async () => {
     const stepNodes = nodes.filter(n => n.type !== 'aiValidation')
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
-    // Validate all steps have a batch command
     const steps = flowToSteps(nodes, edges)
     const emptyStep = steps.find(s => !s.batch?.trim())
     if (emptyStep) {
       toast.error(`步驟「${emptyStep.name}」尚未設定${emptyStep.skillMode ? '任務描述' : '執行指令'}，請點擊該步驟方塊填入`)
       return
     }
+    // 查詢 recipe 狀態，然後顯示選擇 dialog
+    const skillSteps = steps.filter(s => s.skillMode).map(s => s.name)
+    if (skillSteps.length > 0) {
+      try {
+        const status = await getRecipeStatus(pipelineName, skillSteps)
+        setRecipeStatus(status)
+      } catch {
+        setRecipeStatus(null)
+      }
+    } else {
+      setRecipeStatus(null)
+    }
+    setShowRunDialog(true)
+  }
+
+  const handleRunConfirm = async (useRecipe: boolean) => {
+    setShowRunDialog(false)
     const yaml = getYaml()
     setRunning(true)
     setRunStatus('running')
     useRunStatusStore.getState().resetAll()
     try {
-      const res = await startPipeline(yaml, validate)
+      const res = await startPipeline(yaml, validate, useRecipe)
       runIdRef.current = res.run_id
-      toast.success(`Pipeline 已啟動（ID: ${res.run_id}）`)
-      // run 已在後端 store 中，立刻開始 poll
+      toast.success(`Pipeline 已啟動（ID: ${res.run_id}）${useRecipe ? ' ⚡ 快速模式' : ''}`)
       pollStatus(res.run_id)
       pollRef.current = setInterval(() => pollStatus(res.run_id), 1500)
     } catch (e) {
@@ -483,6 +594,20 @@ export default function PipelinePage() {
         setRunStatus(success ? 'success' : 'failed')
         setAwaitingRunId(null)
         toast[success ? 'success' : 'error'](success ? 'Pipeline 執行完成 ✓' : 'Pipeline 執行失敗')
+        // 刷新 recipe 狀態（成功後可能有新 recipe）
+        if (success) {
+          const steps = flowToSteps(nodes as AppNode[], edges)
+          const skillSteps = steps.filter(s => s.skillMode).map(s => s.name)
+          if (skillSteps.length > 0) {
+            getRecipeStatus(pipelineName, skillSteps).then(status => {
+              const map: Record<string, boolean> = {}
+              for (const [name, info] of Object.entries(status.steps)) {
+                if (info.has_recipe) map[name] = true
+              }
+              useRunStatusStore.getState().setRecipeSteps(map)
+            }).catch(() => {})
+          }
+        }
       }
     } catch (e) {
       // 忽略「找不到 pipeline run」的 404（背景任務可能尚未註冊），下次 poll 會自動重試
@@ -591,7 +716,7 @@ export default function PipelinePage() {
 
         {/* Run */}
         <button
-          onClick={handleRun}
+          onClick={handleRunClick}
           disabled={running || nodes.filter(n => n.type !== 'aiValidation').length === 0}
           className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
         >
@@ -735,6 +860,15 @@ export default function PipelinePage() {
       {/* Schedule dialog */}
       {showSchedule && (
         <ScheduleDialog yaml={getYaml()} pipelineName={pipelineName} onClose={() => setShowSchedule(false)} />
+      )}
+
+      {/* Run dialog */}
+      {showRunDialog && (
+        <RunDialog
+          recipeStatus={recipeStatus}
+          onRun={handleRunConfirm}
+          onClose={() => setShowRunDialog(false)}
+        />
       )}
       </div>{/* end right column */}
     </div>

@@ -49,7 +49,8 @@ def _fingerprint_input(path: str) -> str:
                 wb.close()
                 return f"xlsx:{_sha1(sheets)}"
             except Exception:
-                return f"xlsx:size={p.stat().st_size // 1024}K"
+                # fallback: 固定標記（不用 size，因為資料量變化會導致 size 不穩定）
+                return "xlsx:opaque"
         if suffix == ".json":
             try:
                 with open(p, "r", encoding="utf-8") as f:
@@ -65,8 +66,8 @@ def _fingerprint_input(path: str) -> str:
                 return "json:parse_err"
         if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
             return f"image:{suffix[1:]}"
-        # fallback：檔案大小級別
-        return f"{suffix[1:] or 'bin'}:size={p.stat().st_size}"
+        # fallback：只用副檔名（不用 size，因為資料量變化會導致不穩定）
+        return f"{suffix[1:] or 'bin'}:exists"
     except Exception as e:
         return f"error:{type(e).__name__}"
 
@@ -224,6 +225,38 @@ def delete_recipe(pipeline_id: str, step_name: str) -> bool:
         path.unlink()
         return True
     return False
+
+
+def get_pipeline_recipe_status(pipeline_id: str, step_names: list[str]) -> dict:
+    """檢查 pipeline 的 recipe 覆蓋狀態。
+
+    Returns:
+        {
+            "has_recipes": bool,        # 是否有任何 recipe
+            "total_skill_steps": int,   # skill 模式的步驟數
+            "covered_steps": int,       # 已有 recipe 的步驟數
+            "steps": {step_name: {"has_recipe": bool, "success_count": int, ...}, ...}
+        }
+    """
+    steps_info = {}
+    covered = 0
+    for name in step_names:
+        r = load_recipe(pipeline_id, name)
+        if r and not r.disabled:
+            steps_info[name] = {
+                "has_recipe": True,
+                "success_count": r.success_count,
+                "avg_runtime_sec": round(r.avg_runtime_sec, 1),
+            }
+            covered += 1
+        else:
+            steps_info[name] = {"has_recipe": False, "success_count": 0, "avg_runtime_sec": 0}
+    return {
+        "has_recipes": covered > 0,
+        "total_skill_steps": len(step_names),
+        "covered_steps": covered,
+        "steps": steps_info,
+    }
 
 
 def delete_pipeline_recipes(pipeline_id: str) -> int:

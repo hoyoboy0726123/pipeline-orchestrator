@@ -146,11 +146,11 @@ export async function getPipelineRun(runId: string): Promise<PipelineRun> {
   return res.json()
 }
 
-export async function startPipeline(yamlContent: string, validate = true): Promise<{ run_id: string }> {
+export async function startPipeline(yamlContent: string, validate = true, useRecipe = false): Promise<{ run_id: string }> {
   const res = await fetch(`${BASE}/pipeline/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ yaml_content: yamlContent, validate }),
+    body: JSON.stringify({ yaml_content: yamlContent, validate, use_recipe: useRecipe }),
   })
   if (!res.ok) {
     const err = await res.json()
@@ -294,6 +294,20 @@ export async function deletePipelineRecipes(pipelineName: string): Promise<numbe
   if (!res.ok) throw new Error('刪除 pipeline recipes 失敗')
   const data = await res.json()
   return data.deleted_count ?? 0
+}
+
+export interface RecipeStatus {
+  has_recipes: boolean
+  total_skill_steps: number
+  covered_steps: number
+  steps: Record<string, { has_recipe: boolean; success_count: number; avg_runtime_sec: number }>
+}
+
+export async function getRecipeStatus(pipelineName: string, stepNames: string[]): Promise<RecipeStatus> {
+  const params = new URLSearchParams({ steps: stepNames.join(',') })
+  const res = await fetch(`${BASE}/recipes/status/${encodeURIComponent(pipelineName)}?${params}`)
+  if (!res.ok) throw new Error('查詢 recipe 狀態失敗')
+  return res.json()
 }
 
 export async function pipelineChat(messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{

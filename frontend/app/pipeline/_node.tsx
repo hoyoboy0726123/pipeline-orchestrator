@@ -21,6 +21,7 @@ const STATUS_COLOR: Record<string, string> = {
 function PipelineStepNode({ data, selected }: NodeProps<PipelineNode>) {
   // 從外部 store 讀取執行狀態（不透過 ReactFlow node data，避免 setNodes 衝突）
   const runtime = useRunStatusStore(s => s.stepStatuses[data.name])
+  const hasRecipe = useRunStatusStore(s => s.recipeSteps[data.name])
   const status  = runtime?.status ?? 'idle'
   const errorMsg = runtime?.errorMsg ?? ''
 
@@ -69,6 +70,11 @@ function PipelineStepNode({ data, selected }: NodeProps<PipelineNode>) {
         {data.skillMode && (
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-medium shrink-0">
             Skill
+          </span>
+        )}
+        {hasRecipe && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100 font-medium shrink-0" title="已有 Recipe 快取">
+            ⚡
           </span>
         )}
         <span className={`text-sm shrink-0 ${STATUS_COLOR[status]}`}>

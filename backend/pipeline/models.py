@@ -63,4 +63,6 @@ class PipelineConfig(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict) -> "PipelineConfig":
-        return cls(**data)
+        # 過濾掉非 schema 的內部旗標（如 _use_recipe）
+        filtered = {k: v for k, v in data.items() if not k.startswith("_")}
+        return cls(**filtered)

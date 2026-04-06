@@ -113,6 +113,73 @@ async def _notify_final(run: PipelineRun, config: PipelineConfig):
     await _tg_send(run.telegram_chat_id, text)
 
 
+# ── Deterministic validation (fast recipe mode) ──────────────────────────────
+
+def _deterministic_validate(step, exec_result, logger) -> ValidationResult:
+    """Recipe 快速模式：不叫 LLM，只做確定性檢查。"""
+    from pathlib import Path as _Path
+
+    # 1. exit code
+    if exec_result.exit_code != 0:
+        return ValidationResult(
+            status="failed",
+            reason=f"Exit code {exec_result.exit_code}",
+            suggestion="Recipe 執行失敗，建議改用完整模式重跑",
+        )
+
+    # 2. 輸出檔存在 + 大小
+    if step.output and step.output.path:
+        p = _Path(step.output.path)
+        if not p.exists():
+            return ValidationResult(
+                status="failed",
+                reason=f"輸出檔案 {step.output.path} 不存在",
+                suggestion="Recipe 未產生預期檔案，建議改用完整模式",
+            )
+        size = p.stat().st_size
+        if size == 0:
+            return ValidationResult(
+                status="failed",
+                reason=f"輸出檔案 {step.output.path} 為空檔案（0 bytes）",
+                suggestion="Recipe 產生了空檔案，建議改用完整模式",
+            )
+        # CSV: 檢查有 header
+        if p.suffix.lower() == ".csv":
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    lines = sum(1 for _ in f)
+                if lines < 2:
+                    return ValidationResult(
+                        status="failed",
+                        reason=f"CSV 檔案只有 {lines} 行（預期至少有 header + 資料）",
+                        suggestion="",
+                    )
+            except Exception:
+                pass
+        # Excel: 檢查有 sheet
+        if p.suffix.lower() in (".xlsx", ".xls"):
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(p, read_only=True)
+                sheet_count = len(wb.sheetnames)
+                wb.close()
+                if sheet_count == 0:
+                    return ValidationResult(
+                        status="failed",
+                        reason="Excel 檔案沒有任何工作表",
+                        suggestion="",
+                    )
+            except Exception:
+                pass
+
+    logger.info(f"[{step.name}] ⚡ Recipe 快速驗證通過（確定性檢查）")
+    return ValidationResult(
+        status="ok",
+        reason="Recipe 快速模式：exit code=0、輸出檔案存在且非空",
+        suggestion="",
+    )
+
+
 # ── Main pipeline engine ──────────────────────────────────────────────────────
 
 async def run_pipeline(
@@ -158,6 +225,7 @@ async def run_pipeline(
         logger.info(f"Pipeline 開始：{config.name}，共 {len(config.steps)} 步驟")
 
     config = PipelineConfig.from_dict(run.config_dict)
+    use_recipe = run.config_dict.get("_use_recipe", False)
     store.save(run)
 
     # ── Step loop ────────────────────────────────────────────
@@ -198,8 +266,16 @@ async def run_pipeline(
                     step_name=step.name,
                 )
 
-            if config.validate:
-                # 選擇驗證模式：Skill agent 或一般 LLM 驗證
+            # 快速模式：Recipe 命中 + 執行成功 → 確定性驗證（不叫 LLM）
+            recipe_hit = (exec_result.stderr == "__RECIPE_HIT__")
+            if recipe_hit:
+                exec_result.stderr = ""  # 清掉標記
+
+            if recipe_hit and use_recipe and exec_result.exit_code == 0:
+                # 確定性檢查：exit code=0、輸出檔存在、檔案大小合理
+                val = _deterministic_validate(step, exec_result, logger)
+            elif config.validate:
+                # 完整 LLM 驗證
                 use_skill = step.output and step.output.skill_mode
                 validate_fn = validate_step_with_skill if use_skill else validate_step
                 val = await validate_fn(

@@ -13,16 +13,20 @@ interface RunStatusStore {
   /** key = step name, value = runtime status */
   stepStatuses: Record<string, StepStatus>
   edgesAnimated: boolean
+  /** key = step name, true = has active recipe */
+  recipeSteps: Record<string, boolean>
 
   setStepStatus: (name: string, s: StepStatus) => void
   setBulkStatus: (map: Record<string, StepStatus>) => void
   setEdgesAnimated: (v: boolean) => void
+  setRecipeSteps: (map: Record<string, boolean>) => void
   resetAll: () => void
 }
 
 export const useRunStatusStore = create<RunStatusStore>((set) => ({
   stepStatuses: {},
   edgesAnimated: false,
+  recipeSteps: {},
 
   setStepStatus: (name, s) =>
     set((state) => ({
@@ -32,6 +36,8 @@ export const useRunStatusStore = create<RunStatusStore>((set) => ({
   setBulkStatus: (map) => set({ stepStatuses: map }),
 
   setEdgesAnimated: (v) => set({ edgesAnimated: v }),
+
+  setRecipeSteps: (map) => set({ recipeSteps: map }),
 
   resetAll: () => set({ stepStatuses: {}, edgesAnimated: false }),
 }))
