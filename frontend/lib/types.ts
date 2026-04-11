@@ -98,4 +98,5 @@ export interface PipelineRun {
       output?: { path: string; expect: string }
     }>
   }
+  pending_recipes?: Array<{ step_name: string }>
 }

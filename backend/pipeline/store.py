@@ -39,6 +39,7 @@ class PipelineRun:
     started_at: str = field(default_factory=lambda: datetime.now().isoformat())
     ended_at: Optional[str] = None
     workflow_id: Optional[str] = None
+    pending_recipes: list = field(default_factory=list)  # list[dict] — 延遲儲存的 recipes
 
 
 class RunStore:

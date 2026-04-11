@@ -1,0 +1,11 @@
+# AI技能節點可用的 Python 套件
+# 後端啟動時自動安裝缺少的套件到本專案 venv
+# 可透過管理介面新增或移除
+
+pandas
+openpyxl
+matplotlib
+requests
+beautifulsoup4
+Pillow
+python-docx

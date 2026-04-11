@@ -146,11 +146,11 @@ export async function getPipelineRun(runId: string): Promise<PipelineRun> {
   return res.json()
 }
 
-export async function startPipeline(yamlContent: string, validate = true, useRecipe = false, workflowId?: string): Promise<{ run_id: string }> {
+export async function startPipeline(yamlContent: string, validate = true, useRecipe = false, workflowId?: string, noSaveRecipe = false): Promise<{ run_id: string }> {
   const res = await fetch(`${BASE}/pipeline/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ yaml_content: yamlContent, validate, use_recipe: useRecipe, workflow_id: workflowId ?? null }),
+    body: JSON.stringify({ yaml_content: yamlContent, validate, use_recipe: useRecipe, workflow_id: workflowId ?? null, no_save_recipe: noSaveRecipe }),
   })
   if (!res.ok) {
     const err = await res.json()
@@ -174,6 +174,25 @@ export async function resumePipeline(runId: string, decision: 'retry' | 'skip' |
   return res.json()
 }
 
+export async function abortPipeline(runId: string): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/pipeline/runs/${runId}/abort`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail ?? '中止失敗')
+  }
+  return res.json()
+}
+
+export async function savePendingRecipes(runId: string): Promise<{ saved: number }> {
+  const res = await fetch(`${BASE}/pipeline/runs/${runId}/save-recipes`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error('儲存 Recipe 失敗')
+  return res.json()
+}
+
 export async function getPipelineLog(runId: string): Promise<{ log: string }> {
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/log`)
   if (!res.ok) throw new Error('取得 log 失敗')
@@ -193,6 +212,7 @@ export async function createPipelineSchedule(req: {
   schedule_expr: string
   validate?: boolean
   use_recipe?: boolean
+  workflow_id?: string
 }): Promise<ScheduledTask> {
   const res = await fetch(`${BASE}/pipeline/scheduled`, {
     method: 'POST',
@@ -256,6 +276,40 @@ export async function getAvailableModels(): Promise<AvailableModels> {
   const res = await fetch(`${BASE}/settings/models/available`)
   if (!res.ok) throw new Error('讀取模型清單失敗')
   return res.json()
+}
+
+// ── Skill Packages ─────────────────────────────────────────
+export interface SkillPackage {
+  name: string
+  installed: boolean
+  version: string
+}
+
+export async function getSkillPackages(): Promise<SkillPackage[]> {
+  const res = await fetch(`${BASE}/settings/skill-packages`)
+  if (!res.ok) throw new Error('讀取套件清單失敗')
+  const data = await res.json()
+  return data.packages
+}
+
+export async function addSkillPackage(name: string): Promise<string> {
+  const res = await fetch(`${BASE}/settings/skill-packages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail ?? '安裝失敗')
+  return data.message
+}
+
+export async function removeSkillPackage(name: string): Promise<string> {
+  const res = await fetch(`${BASE}/settings/skill-packages/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail ?? '移除失敗')
+  return data.message
 }
 
 // ── Workflows ───────────────────────────────────────────────

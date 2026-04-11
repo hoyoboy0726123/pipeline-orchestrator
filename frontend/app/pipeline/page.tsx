@@ -10,7 +10,7 @@ import {
 import '@xyflow/react/dist/style.css'
 
 import {
-  Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap,
+  Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap, Square,
   Loader2, CheckCircle2, XCircle, Workflow, Terminal, X,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -31,7 +31,7 @@ import {
 } from './_helpers'
 import { useWorkflowStore } from './_store'
 import {
-  startPipeline, getPipelineRun, resumePipeline,
+  startPipeline, getPipelineRun, resumePipeline, abortPipeline, savePendingRecipes,
   createPipelineSchedule, getPipelineLog,
   getPipelineRuns,
   getRecipeStatus, type RecipeStatus,
@@ -46,8 +46,8 @@ const nodeTypes = {
 }
 
 // ── Schedule Dialog ───────────────────────────────────────────────────────────
-function ScheduleDialog({ yaml, pipelineName, recipeStatus, onClose }: {
-  yaml: string; pipelineName: string; recipeStatus: RecipeStatus | null; onClose: () => void
+function ScheduleDialog({ yaml, pipelineName, workflowId, recipeStatus, onClose }: {
+  yaml: string; pipelineName: string; workflowId: string | null; recipeStatus: RecipeStatus | null; onClose: () => void
 }) {
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -80,6 +80,7 @@ function ScheduleDialog({ yaml, pipelineName, recipeStatus, onClose }: {
         schedule_expr: expr,
         validate: !useRecipe,
         use_recipe: useRecipe,
+        workflow_id: workflowId ?? undefined,
       })
       toast.success(`排程已建立${useRecipe ? '（快速模式）' : '（完整模式）'}`)
       onClose()
@@ -300,6 +301,9 @@ export default function PipelinePage() {
   const [running, setRunning]     = useState(false)
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'success' | 'failed' | 'awaiting'>('idle')
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
+  const [showRecipeConfirm, setShowRecipeConfirm] = useState(false)
+  const [pendingRecipeRunId, setPendingRecipeRunId] = useState<string | null>(null)
+  const [pendingRecipeCount, setPendingRecipeCount] = useState(0)
   const [showLog, setShowLog]       = useState(false)
   const [logLines, setLogLines]     = useState<string[]>([])
   const logEndRef  = useRef<HTMLDivElement>(null)
@@ -629,7 +633,8 @@ export default function PipelinePage() {
     try {
       const steps = flowToSteps(nodes, edges)
       const needsValidate = steps.some(s => s.skillMode || !!s.expect)
-      const res = await startPipeline(yaml, needsValidate, useRecipe, activeId ?? undefined)
+      const hasSkill = steps.some(s => s.skillMode)
+      const res = await startPipeline(yaml, needsValidate, useRecipe, activeId ?? undefined, hasSkill)
       runIdRef.current = res.run_id
       toast.success(`Pipeline 已啟動（ID: ${res.run_id}）${useRecipe ? ' ⚡ 快速模式' : ''}`)
       pollStatus(res.run_id)
@@ -638,6 +643,17 @@ export default function PipelinePage() {
       toast.error(e instanceof Error ? e.message : '啟動失敗')
       setRunning(false)
       setRunStatus('failed')
+    }
+  }
+
+  const handleAbort = async () => {
+    const rid = runIdRef.current
+    if (!rid) return
+    try {
+      const res = await abortPipeline(rid)
+      toast.info(res.message)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '中止失敗')
     }
   }
 
@@ -690,7 +706,13 @@ export default function PipelinePage() {
         const success = data.status === 'completed'
         setRunStatus(success ? 'success' : 'failed')
         setAwaitingRunId(null)
-        toast[success ? 'success' : 'error'](success ? 'Pipeline 執行完成 ✓' : 'Pipeline 執行失敗')
+        toast[success ? 'success' : 'error'](success ? 'Pipeline 執行完成 ✓' : data.status === 'aborted' ? 'Pipeline 已中止' : 'Pipeline 執行失敗')
+        // 成功且有待確認的 recipes → 顯示確認對話框
+        if (success && data.pending_recipes && data.pending_recipes.length > 0) {
+          setPendingRecipeRunId(data.run_id)
+          setPendingRecipeCount(data.pending_recipes.length)
+          setShowRecipeConfirm(true)
+        }
         // 刷新 recipe 狀態（成功後可能有新 recipe）
         if (success) {
           const steps = flowToSteps(nodes as AppNode[], edges)
@@ -814,16 +836,23 @@ export default function PipelinePage() {
           <Clock className="w-3.5 h-3.5" /> 排程
         </button>
 
-        {/* Run */}
-        <button
-          onClick={handleRunClick}
-          disabled={running || nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep').length === 0}
-          className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
-        >
-          {running
-            ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 執行中</>
-            : <><Play className="w-3.5 h-3.5" /> 執行</>}
-        </button>
+        {/* Run / Stop */}
+        {running ? (
+          <button
+            onClick={handleAbort}
+            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-red-600 text-white hover:bg-red-700 transition-colors font-medium shadow-sm"
+          >
+            <Square className="w-3.5 h-3.5" /> 停止
+          </button>
+        ) : (
+          <button
+            onClick={handleRunClick}
+            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep').length === 0}
+            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
+          >
+            <Play className="w-3.5 h-3.5" /> 執行
+          </button>
+        )}
       </header>
 
       {/* ── Canvas area ── */}
@@ -974,7 +1003,7 @@ export default function PipelinePage() {
 
       {/* Schedule dialog */}
       {showSchedule && (
-        <ScheduleDialog yaml={getYaml()} pipelineName={pipelineName} recipeStatus={recipeStatus} onClose={() => setShowSchedule(false)} />
+        <ScheduleDialog yaml={getYaml()} pipelineName={pipelineName} workflowId={activeId ?? null} recipeStatus={recipeStatus} onClose={() => setShowSchedule(false)} />
       )}
 
       {/* Run dialog */}
@@ -984,6 +1013,58 @@ export default function PipelinePage() {
           onRun={handleRunConfirm}
           onClose={() => setShowRunDialog(false)}
         />
+      )}
+
+      {/* Recipe 覆蓋確認 */}
+      {showRecipeConfirm && pendingRecipeRunId && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4">
+            <h3 className="text-base font-semibold text-gray-900 mb-2">💾 儲存 Recipe？</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Pipeline 執行成功，有 {pendingRecipeCount} 個 AI 技能步驟產生了新的 Recipe。
+              是否覆蓋現有 Recipe？
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowRecipeConfirm(false)
+                  setPendingRecipeRunId(null)
+                  toast.info('已跳過 Recipe 儲存')
+                }}
+                className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
+              >
+                不儲存
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await savePendingRecipes(pendingRecipeRunId)
+                    toast.success(`已儲存 ${res.saved} 個 Recipe`)
+                    // 刷新 recipe 狀態
+                    const steps = flowToSteps(nodes as AppNode[], edges)
+                    const skillSteps = steps.filter(s => s.skillMode).map(s => s.name)
+                    if (skillSteps.length > 0) {
+                      getRecipeStatus(pipelineName, skillSteps).then(status => {
+                        const map: Record<string, boolean> = {}
+                        for (const [name, info] of Object.entries(status.steps)) {
+                          if (info.has_recipe) map[name] = true
+                        }
+                        useRunStatusStore.getState().setRecipeSteps(map)
+                      }).catch(() => {})
+                    }
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : '儲存失敗')
+                  }
+                  setShowRecipeConfirm(false)
+                  setPendingRecipeRunId(null)
+                }}
+                className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-medium"
+              >
+                覆蓋儲存
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       </div>{/* end right column */}
     </div>

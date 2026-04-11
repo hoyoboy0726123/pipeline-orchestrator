@@ -27,8 +27,17 @@ from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 SKILL_TOOL_TIMEOUT = 60
 SKILL_MAX_ITERATIONS = 15
 
-# Skill 模式需要的核心套件（探測用，非強制）
-_SKILL_REQUIRED_PKGS = ("matplotlib", "pandas", "openpyxl")
+# Skill 模式需要的核心套件（探測用，從 skill_packages.txt 讀取）
+def _load_skill_required_pkgs() -> tuple[str, ...]:
+    pkg_file = Path(__file__).parent.parent / "skill_packages.txt"
+    if pkg_file.exists():
+        lines = pkg_file.read_text(encoding="utf-8").splitlines()
+        pkgs = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+        if pkgs:
+            return tuple(pkgs[:3])  # 取前 3 個作為探測用
+    return ("matplotlib", "pandas", "openpyxl")
+
+_SKILL_REQUIRED_PKGS = _load_skill_required_pkgs()
 
 
 def _detect_python_interpreter() -> str:
@@ -147,6 +156,7 @@ class ExecResult:
     exit_code: int
     stdout: str
     stderr: str
+    pending_recipe: Optional[dict] = None  # 延遲儲存的 recipe 資料
 
 
 async def execute_step(
@@ -525,6 +535,7 @@ async def execute_step_with_skill(
     prev_outputs: Optional[list] = None,
     pipeline_id: Optional[str] = None,
     use_recipe: bool = True,
+    no_save_recipe: bool = False,
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -795,27 +806,55 @@ async def execute_step_with_skill(
                     all_stdout.append(f"[Skill 完成] {summary}")
                     logger.info(f"[{step_name}] Skill 執行完成：{'成功' if success else '失敗'} — {summary}")
                     # 成功 → 儲存 recipe 供下次快速重跑
+                    _pending_recipe = None
                     if success and pipeline_id and last_successful_code:
                         try:
                             import sys as _sys2
-                            from db import save_recipe as _db_save_recipe
                             from pipeline.recipe import _sha1 as _recipe_sha1, _fingerprint_input as _recipe_fp
                             runtime = _time.time() - skill_start_time
                             _fp = {}
                             for p in (input_paths or []):
                                 _fp[str(p)] = _recipe_fp(p)
-                            _db_save_recipe(
-                                pipeline_id, step_name, _recipe_sha1(task_description),
-                                _fp, output_path, last_successful_code,
-                                f"{_sys2.version_info.major}.{_sys2.version_info.minor}",
-                                runtime,
-                            )
+                            recipe_data = {
+                                "pipeline_id": pipeline_id,
+                                "step_name": step_name,
+                                "task_hash": _recipe_sha1(task_description),
+                                "input_fingerprints": _fp,
+                                "output_path": output_path,
+                                "code": last_successful_code,
+                                "python_version": f"{_sys2.version_info.major}.{_sys2.version_info.minor}",
+                                "runtime_sec": runtime,
+                            }
+                            if no_save_recipe:
+                                # 延遲模式：檢查是否已有 recipe
+                                from db import get_recipe as _get_recipe, save_recipe as _db_save_recipe
+                                existing = _get_recipe(pipeline_id, step_name)
+                                if existing:
+                                    # 已有 recipe → 延遲儲存等用戶確認（避免覆蓋）
+                                    _pending_recipe = recipe_data
+                                    logger.info(f"[{step_name}] Recipe 已存在，延遲儲存等待確認")
+                                else:
+                                    # 無 recipe → 直接儲存（建立新的不算覆蓋）
+                                    _db_save_recipe(
+                                        pipeline_id, step_name, recipe_data["task_hash"],
+                                        _fp, output_path, last_successful_code,
+                                        recipe_data["python_version"], runtime,
+                                    )
+                                    logger.info(f"[{step_name}] 首次建立 Recipe")
+                            else:
+                                from db import save_recipe as _db_save_recipe
+                                _db_save_recipe(
+                                    pipeline_id, step_name, recipe_data["task_hash"],
+                                    _fp, output_path, last_successful_code,
+                                    recipe_data["python_version"], runtime,
+                                )
                         except Exception as e:
                             logger.warning(f"[{step_name}] Recipe 儲存失敗：{e}")
                     return ExecResult(
                         exit_code=0 if success else 1,
                         stdout="\n".join(all_stdout),
                         stderr="" if success else summary,
+                        pending_recipe=_pending_recipe,
                     )
                 except json.JSONDecodeError:
                     messages.append(HumanMessage(content=reply))

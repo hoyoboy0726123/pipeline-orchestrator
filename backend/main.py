@@ -31,6 +31,9 @@ async def startup():
     from db import init_db
     init_db()
     print("✅ SQLite 資料庫已初始化")
+    # 自動安裝 skill_packages.txt 中缺少的套件
+    from skill_pkg_manager import auto_install_packages
+    auto_install_packages()
     await sched_start()
     print("✅ Pipeline Scheduler 已啟動")
 
@@ -124,6 +127,35 @@ async def get_available_models():
         "ollama_base_url": base_url,
         "ollama_error": ollama_error,
     }
+
+
+# ── Skill Packages ──────────────────────────────────────────
+@app.get("/settings/skill-packages")
+async def get_skill_packages():
+    from skill_pkg_manager import list_packages
+    return {"packages": list_packages()}
+
+
+class SkillPackageRequest(BaseModel):
+    name: str
+
+
+@app.post("/settings/skill-packages")
+async def add_skill_package(req: SkillPackageRequest):
+    from skill_pkg_manager import add_package
+    ok, msg = add_package(req.name)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"message": msg}
+
+
+@app.delete("/settings/skill-packages/{pkg_name}")
+async def remove_skill_package(pkg_name: str):
+    from skill_pkg_manager import remove_package
+    ok, msg = remove_package(pkg_name)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"message": msg}
 
 
 # ── Workflows CRUD ──────────────────────────────────────────
@@ -374,6 +406,7 @@ class PipelineRunRequest(BaseModel):
     validate: bool = True
     use_recipe: bool = False  # True = 快速模式：recipe 命中時跳過 LLM 驗證
     workflow_id: Optional[str] = None  # 關聯工作流 ID
+    no_save_recipe: bool = False  # True = 延遲 recipe 儲存，等用戶確認
 
 
 class PipelineDecisionRequest(BaseModel):
@@ -406,6 +439,7 @@ async def start_pipeline(req: PipelineRunRequest):
     config_d = config.model_dump()
     config_d["_use_recipe"] = req.use_recipe  # 傳遞快速模式旗標
     config_d["_workflow_id"] = req.workflow_id  # 關聯工作流
+    config_d["_no_save_recipe"] = req.no_save_recipe  # 延遲 recipe 儲存
     run = PRun(
         run_id=run_id,
         pipeline_name=config.name,
@@ -455,6 +489,53 @@ async def resume_pipeline_run(run_id: str, req: PipelineDecisionRequest):
     return {"message": msg}
 
 
+@app.post("/pipeline/runs/{run_id}/abort")
+async def abort_pipeline_run(run_id: str):
+    """中止正在執行的 pipeline（不限狀態）"""
+    from pipeline.store import get_store
+    from pipeline.runner import request_abort
+    run = get_store().load(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="找不到 pipeline run")
+    if run.status not in ("running", "awaiting_human"):
+        raise HTTPException(status_code=400, detail=f"Pipeline 狀態為 {run.status}，無法中止")
+    if run.status == "awaiting_human":
+        # 直接中止等待中的 pipeline
+        from pipeline.runner import resume_pipeline
+        msg = await resume_pipeline(run_id, "abort")
+        return {"message": msg}
+    # running → 設置中止旗標，runner 下一步迴圈會檢查
+    request_abort(run_id)
+    return {"message": f"已發送中止請求，Pipeline 將在當前步驟完成後停止"}
+
+
+@app.post("/pipeline/runs/{run_id}/save-recipes")
+async def save_pending_recipes(run_id: str):
+    """用戶確認後，將延遲儲存的 recipes 寫入 DB"""
+    from pipeline.store import get_store
+    from db import save_recipe as _db_save_recipe
+    store = get_store()
+    run = store.load(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="找不到 pipeline run")
+    if not run.pending_recipes:
+        return {"saved": 0}
+    saved = 0
+    for r in run.pending_recipes:
+        try:
+            _db_save_recipe(
+                r["pipeline_id"], r["step_name"], r["task_hash"],
+                r["input_fingerprints"], r["output_path"], r["code"],
+                r["python_version"], r["runtime_sec"],
+            )
+            saved += 1
+        except Exception:
+            pass
+    run.pending_recipes = []
+    store.save(run)
+    return {"saved": saved}
+
+
 @app.get("/pipeline/runs/{run_id}/log")
 async def get_pipeline_log(run_id: str):
     from pipeline.store import get_store
@@ -483,6 +564,7 @@ class PipelineScheduleRequest(BaseModel):
     schedule_expr: str = "0 8 * * *"
     validate: bool = True
     use_recipe: bool = False
+    workflow_id: Optional[str] = None
 
 
 @app.post("/pipeline/scheduled")
@@ -497,6 +579,8 @@ async def create_pipeline_schedule(req: PipelineScheduleRequest):
         config_dict["validate"] = req.validate
         PipelineConfig(**{k: v for k, v in config_dict.items() if not k.startswith("_")})
         config_dict["_use_recipe"] = req.use_recipe
+        if req.workflow_id:
+            config_dict["_workflow_id"] = req.workflow_id
         yaml_to_save = yaml.dump({"pipeline": config_dict}, allow_unicode=True, default_flow_style=False)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"YAML 格式錯誤：{e}")
@@ -594,4 +678,5 @@ def _run_to_dict(r):
         ],
         "config_dict": r.config_dict,
         "log_path": r.log_path,
+        "pending_recipes": getattr(r, 'pending_recipes', []) or [],
     }

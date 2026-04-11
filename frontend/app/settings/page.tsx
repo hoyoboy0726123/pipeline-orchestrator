@@ -1,14 +1,159 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain } from 'lucide-react'
+import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { toast, Toaster } from 'sonner'
 import {
   getModelSettings, saveModelSettings, getAvailableModels,
-  type ModelSettings, type AvailableModels,
+  getSkillPackages, addSkillPackage, removeSkillPackage,
+  type ModelSettings, type AvailableModels, type SkillPackage,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
+
+// ── Skill Packages Section ────────────────────────────────────────────────────
+function SkillPackagesSection() {
+  const [packages, setPackages] = useState<SkillPackage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [newPkg, setNewPkg] = useState('')
+  const [installing, setInstalling] = useState(false)
+  const [removingPkg, setRemovingPkg] = useState<string | null>(null)
+
+  const loadPkgs = async () => {
+    setLoading(true)
+    try {
+      const pkgs = await getSkillPackages()
+      setPackages(pkgs)
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadPkgs() }, [])
+
+  const handleAdd = async () => {
+    const name = newPkg.trim()
+    if (!name) return
+    setInstalling(true)
+    try {
+      const msg = await addSkillPackage(name)
+      toast.success(msg)
+      setNewPkg('')
+      await loadPkgs()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setInstalling(false)
+    }
+  }
+
+  const handleRemove = async (name: string) => {
+    setRemovingPkg(name)
+    try {
+      const msg = await removeSkillPackage(name)
+      toast.success(msg)
+      await loadPkgs()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setRemovingPkg(null)
+    }
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-purple-100 flex items-center justify-center">
+          <Package className="w-5 h-5 text-purple-700" />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">AI技能套件</h2>
+          <p className="text-sm text-gray-500">管理 AI技能節點可使用的 Python 第三方套件</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* 新增套件 */}
+        <div className="p-4 border-b border-gray-100">
+          <div className="flex gap-2">
+            <input
+              value={newPkg}
+              onChange={e => setNewPkg(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleAdd()}
+              placeholder="輸入套件名稱（如 selenium、numpy）"
+              disabled={installing}
+              className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+            />
+            <button
+              onClick={handleAdd}
+              disabled={installing || !newPkg.trim()}
+              className={cn(
+                'px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-all',
+                installing || !newPkg.trim()
+                  ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                  : 'bg-purple-600 text-white hover:bg-purple-700'
+              )}
+            >
+              {installing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+              安裝
+            </button>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">套件會安裝到後端的 Python 環境中，AI技能節點執行時可直接 import 使用</p>
+        </div>
+
+        {/* 套件清單 */}
+        <div className="divide-y divide-gray-100">
+          {loading ? (
+            <div className="p-6 text-center text-gray-400 text-sm">
+              <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
+              載入中...
+            </div>
+          ) : packages.length === 0 ? (
+            <div className="p-6 text-center text-gray-400 text-sm">尚無套件</div>
+          ) : (
+            packages.map(pkg => (
+              <div key={pkg.name} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-mono font-medium text-gray-900">{pkg.name}</span>
+                    {pkg.installed ? (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
+                        {pkg.version || '已安裝'}
+                      </span>
+                    ) : (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 font-medium">
+                        未安裝
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleRemove(pkg.name)}
+                  disabled={removingPkg === pkg.name}
+                  className="p-1.5 text-gray-300 hover:text-red-500 transition-colors disabled:opacity-50"
+                  title="移除套件"
+                >
+                  {removingPkg === pkg.name
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Trash2 className="w-4 h-4" />}
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* 底部說明 */}
+        <div className="px-4 py-3 bg-gray-50 border-t border-gray-100">
+          <p className="text-xs text-gray-500">
+            套件清單儲存在 <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">backend/skill_packages.txt</code>，後端啟動時自動安裝缺少的套件
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function SettingsPage() {
   const [current, setCurrent] = useState<ModelSettings | null>(null)
@@ -303,6 +448,9 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+
+        {/* Skill Packages */}
+        <SkillPackagesSection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">

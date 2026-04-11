@@ -236,7 +236,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
     lines.push(`  - name: ${s.name}`)
     if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
     if (s.batch) {
-      if (s.batch.includes('\n')) {
+      if (s.batch.includes('\n') || s.batch.length > 80) {
         lines.push(`    batch: |`)
         for (const bl of s.batch.split('\n')) {
           lines.push(`      ${bl}`)
@@ -251,7 +251,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
       if (s.expect) {
         lines.push(`      ai_validation: true`)
-        if (s.expect.includes('\n')) {
+        if (s.expect.includes('\n') || s.expect.length > 80) {
           lines.push(`      description: |`)
           for (const dl of s.expect.split('\n')) {
             lines.push(`        ${dl}`)
@@ -359,6 +359,13 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
       } else if (/^retry:/.test(t) && cur) {
         cur.retry = parseInt(t.replace(/^retry:\s*/, '')) || 0
         inOutput = false
+      } else if (cur && t && !t.startsWith('-')) {
+        // 不匹配任何 key 的行 → 追加到 batch（處理長文字被換行的情況）
+        if (cur.batch && !inOutput) {
+          cur.batch += ' ' + t
+        } else if (cur.expect && inOutput) {
+          cur.expect += ' ' + t
+        }
       }
     }
     flushMultiline()

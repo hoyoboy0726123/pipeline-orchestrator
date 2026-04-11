@@ -27,6 +27,23 @@ from .executor import execute_step, execute_step_with_skill
 from .validator import validate_step, validate_step_with_skill, ValidationResult
 
 
+# ── Abort flags（in-memory）────────────────────────────────────────────────────
+_abort_flags: set[str] = set()
+
+
+def request_abort(run_id: str):
+    """前端/API 呼叫：標記此 run 需要中止"""
+    _abort_flags.add(run_id)
+
+
+def is_abort_requested(run_id: str) -> bool:
+    return run_id in _abort_flags
+
+
+def clear_abort(run_id: str):
+    _abort_flags.discard(run_id)
+
+
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
 def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
@@ -232,7 +249,19 @@ async def run_pipeline(
     # ── Step loop ────────────────────────────────────────────
     completed_outputs: list[dict] = []  # 收集前步驟的輸出資訊
 
+    no_save_recipe = run.config_dict.get("_no_save_recipe", False)
+
     while run.current_step < len(config.steps):
+        # ── 每步開始前檢查中止旗標 ──
+        if is_abort_requested(run.run_id):
+            clear_abort(run.run_id)
+            run.status = "aborted"
+            run.ended_at = datetime.now().isoformat()
+            store.save(run)
+            logger.info("用戶透過 UI 中止 Pipeline")
+            await _notify_final(run, config)
+            return run.run_id
+
         step = config.steps[run.current_step]
         step_num = run.current_step + 1
         total = len(config.steps)
@@ -259,6 +288,7 @@ async def run_pipeline(
                     prev_outputs=completed_outputs if completed_outputs else None,
                     pipeline_id=workflow_id or config.name,
                     use_recipe=use_recipe,
+                    no_save_recipe=no_save_recipe,
                 )
             else:
                 exec_result = await execute_step(
@@ -320,6 +350,9 @@ async def run_pipeline(
 
             if val.status == "ok":
                 logger.info(f"步驟 {step_num} ✅ 通過")
+                # 收集延遲儲存的 recipe
+                if hasattr(exec_result, 'pending_recipe') and exec_result.pending_recipe:
+                    run.pending_recipes.append(exec_result.pending_recipe)
                 # 收集此步驟的輸出資訊供後續步驟參考
                 if step.output and step.output.path:
                     out_info = {"path": step.output.path, "schema": ""}
@@ -357,6 +390,7 @@ async def run_pipeline(
                 return run.run_id  # 暫停
 
     # ── 全部步驟完成 ─────────────────────────────────────────
+    clear_abort(run.run_id)
     run.status = "completed"
     run.ended_at = datetime.now().isoformat()
     store.save(run)
