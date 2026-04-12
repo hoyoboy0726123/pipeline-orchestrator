@@ -10,6 +10,7 @@ export interface StepData extends Record<string, unknown> {
   outputPath: string
   expect: string
   skillMode?: boolean   // optional — 僅在 YAML 序列化時使用，節點類型由 node.type 決定
+  readonly?: boolean    // optional — skill 唯讀驗證模式
   timeout: number
   retry: number
   index: number
@@ -24,6 +25,7 @@ export interface SkillData extends Record<string, unknown> {
   workingDir: string
   outputPath: string
   expectedOutput: string
+  readonly: boolean
   timeout: number
   retry: number
   index: number
@@ -74,6 +76,7 @@ export function newSkillData(index = 0): SkillData {
     workingDir: '',
     outputPath: '',
     expectedOutput: '',
+    readonly: false,
     timeout: 300,
     retry: 0,
     index,
@@ -101,6 +104,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           workingDir: s.workingDir,
           outputPath: s.outputPath,
           expectedOutput: s.expect,
+          readonly: s.readonly || false,
           timeout: s.timeout,
           retry: s.retry,
           index: i,
@@ -197,6 +201,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         outputPath: d.outputPath,
         expect: aiData?.expectText || d.expectedOutput,
         skillMode: true,
+        readonly: d.readonly || false,
         timeout: d.timeout,
         retry: d.retry,
         index: i,
@@ -246,6 +251,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       }
     }
     if (s.skillMode) lines.push(`    skill_mode: true`)
+    if (s.readonly) lines.push(`    readonly: true`)
     if (s.outputPath || s.expect) {
       lines.push(`    output:`)
       if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
@@ -353,6 +359,8 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         if (/true/.test(t)) validate = true
       } else if (/^skill_mode:/.test(t) && cur) {
         cur.skillMode = /true/.test(t)
+      } else if (/^readonly:/.test(t) && cur) {
+        cur.readonly = /true/.test(t)
       } else if (/^timeout:/.test(t) && cur) {
         cur.timeout = parseInt(t.replace(/^timeout:\s*/, '')) || 300
         inOutput = false
@@ -382,6 +390,7 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     outputPath: partial.outputPath ?? '',
     expect: partial.expect ?? '',
     skillMode: partial.skillMode ?? false,
+    readonly: partial.readonly ?? false,
     timeout: partial.timeout ?? 300,
     retry: partial.retry ?? 0,
     index,

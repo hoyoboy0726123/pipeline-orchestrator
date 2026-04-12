@@ -47,6 +47,7 @@ class PipelineStep(BaseModel):
     output: Optional[StepOutput] = None
     retry: int = 1        # 自動重試次數（超過才問用戶）
     skill_mode: bool = False  # True = batch 為自然語言，由 LLM Skill agent 執行
+    readonly: bool = False  # True = 唯讀驗證模式，禁止修改檔案
 
 
 class PipelineConfig(BaseModel):

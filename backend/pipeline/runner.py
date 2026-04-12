@@ -289,6 +289,7 @@ async def run_pipeline(
                     pipeline_id=workflow_id or config.name,
                     use_recipe=use_recipe,
                     no_save_recipe=no_save_recipe,
+                    readonly=step.readonly,
                 )
             else:
                 exec_result = await execute_step(
@@ -303,9 +304,23 @@ async def run_pipeline(
             if recipe_hit:
                 exec_result.stderr = ""  # 清掉標記
 
-            if recipe_hit and use_recipe and exec_result.exit_code == 0:
-                # 確定性檢查：exit code=0、輸出檔存在、檔案大小合理
+            has_expect = step.output and step.output.get_expect()
+            if recipe_hit and use_recipe and exec_result.exit_code == 0 and not has_expect:
+                # 確定性檢查：exit code=0、輸出檔存在、檔案大小合理（無 AI 驗證節點）
                 val = _deterministic_validate(step, exec_result, logger)
+            elif recipe_hit and use_recipe and exec_result.exit_code == 0 and has_expect:
+                # Recipe 命中但有 AI 驗證節點 → 快速 LLM 驗證（不走 Skill 深度驗證）
+                logger.info(f"[{step.name}] 🔍 Recipe 命中 + 有 AI 驗證需求，走快速 LLM 驗證")
+                val = await validate_step(
+                    step_name=step.name,
+                    command=step.batch,
+                    exit_code=exec_result.exit_code,
+                    stdout=exec_result.stdout,
+                    stderr=exec_result.stderr,
+                    output_path=step.output.path if step.output else None,
+                    output_expect=step.output.get_expect() if step.output else None,
+                    logger=logger,
+                )
             elif config.validate:
                 # 完整 LLM 驗證
                 use_skill = step.output and step.output.skill_mode

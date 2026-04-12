@@ -154,6 +154,28 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
             <p className="text-xs text-gray-400 mt-1">AI 會將結果寫入此路徑</p>
           </div>
 
+          {/* Readonly toggle */}
+          <div className="flex items-center justify-between p-3 rounded-xl border border-gray-200 bg-gray-50/50">
+            <div className="flex-1 min-w-0 mr-3">
+              <div className="text-sm font-medium text-gray-700">🔒 唯讀驗證模式</div>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {data.readonly
+                  ? '已啟用：AI 只做深度驗證，禁止修改任何檔案來完成任務'
+                  : '關閉中：AI 可自由讀寫檔案來完成任務'}
+              </p>
+            </div>
+            <button
+              onClick={() => onUpdate({ readonly: !data.readonly })}
+              className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${
+                data.readonly ? 'bg-amber-500' : 'bg-gray-300'
+              }`}
+            >
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                data.readonly ? 'translate-x-5' : 'translate-x-0.5'
+              }`} />
+            </button>
+          </div>
+
           {/* Expected Output */}
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">預期輸出描述</label>

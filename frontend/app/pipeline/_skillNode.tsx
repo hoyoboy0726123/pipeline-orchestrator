@@ -38,7 +38,9 @@ function SkillStepNode({ data, selected }: NodeProps<SkillNodeType>) {
       <div className="px-3 py-2.5 flex items-center gap-2" style={{ background: color }}>
         <span className="text-white text-xs">✨</span>
         <span className="text-white font-semibold text-sm flex-1 truncate leading-tight">{data.name}</span>
-        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-medium shrink-0">AI技能</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-medium shrink-0">
+          {data.readonly ? '🔒 唯讀驗證' : 'AI技能'}
+        </span>
         {hasRecipe && (
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100 font-medium shrink-0" title="已有 Recipe 快取">
             ⚡

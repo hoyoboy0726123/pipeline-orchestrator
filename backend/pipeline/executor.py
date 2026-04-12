@@ -536,6 +536,7 @@ async def execute_step_with_skill(
     pipeline_id: Optional[str] = None,
     use_recipe: bool = True,
     no_save_recipe: bool = False,
+    readonly: bool = False,
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -711,6 +712,20 @@ async def execute_step_with_skill(
 - **程式碼執行成功後，下一回覆直接用 <tool>done</tool><input>{"success": true, "summary": "..."}</input> 結束**
 - 最後一定要呼叫 done 工具回報結果
 - 用中文回覆 summary / error"""
+
+    # 唯讀模式：注入禁止修改的約束
+    if readonly:
+        system_prompt += """
+
+【🔒 唯讀驗證模式】
+此步驟為「唯讀深度驗證」，你的職責是：
+- **只能讀取、分析、檢查檔案內容**
+- **嚴禁修改、覆寫、重新命名任何檔案或欄位**
+- **嚴禁用程式碼「修正」資料來通過驗證**
+- 如果檢查結果不符合預期 → 直接用 done 回報 success=false 並說明哪裡不符
+- 如果檢查結果符合預期 → 用 done 回報 success=true 並說明驗證通過的理由
+- **你只是驗證者，不是修復者**"""
+        logger.info(f"[{step_name}] 🔒 唯讀驗證模式已啟用")
 
     output_hint = f"\n輸出路徑提示：請將結果存到 {output_path}" if output_path else ""
     wd_hint = f"\n工作目錄：{working_dir}（所有相對路徑都相對於此目錄，請使用絕對路徑存取檔案）" if working_dir else ""
