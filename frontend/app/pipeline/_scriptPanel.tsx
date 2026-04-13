@@ -199,30 +199,29 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
           {/* Command */}
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">執行指令</label>
+            <select value={selectedPrefix}
+              onChange={e => { const p = e.target.value; setSelectedPrefix(p); if (filePath) upd({ batch: p ? `${p} ${filePath}` : filePath }) }}
+              className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white text-gray-700 outline-none focus:border-indigo-400 cursor-pointer mb-1.5">
+              <optgroup label="跨平台">
+                {EXEC_PREFIXES.filter(p => p.platform === 'cross').map((p, i) => <option key={`c-${i}`} value={p.value}>{p.label}</option>)}
+              </optgroup>
+              <optgroup label="macOS / Linux">
+                {EXEC_PREFIXES.filter(p => p.platform === 'unix').map((p, i) => <option key={`u-${i}`} value={p.value}>{p.label}</option>)}
+              </optgroup>
+              <optgroup label="Windows">
+                {EXEC_PREFIXES.filter(p => p.platform === 'win').map((p, i) => <option key={`w-${i}`} value={p.value}>{p.label}</option>)}
+              </optgroup>
+            </select>
             <div className="flex gap-1.5 mb-1.5">
-              <select value={selectedPrefix}
-                onChange={e => { const p = e.target.value; setSelectedPrefix(p); if (filePath) upd({ batch: p ? `${p} ${filePath}` : filePath }) }}
-                className="shrink-0 border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white text-gray-700 outline-none focus:border-indigo-400 cursor-pointer">
-                <optgroup label="跨平台">
-                  {EXEC_PREFIXES.filter(p => p.platform === 'cross').map((p, i) => <option key={`c-${i}`} value={p.value}>{p.label}</option>)}
-                </optgroup>
-                <optgroup label="macOS / Linux">
-                  {EXEC_PREFIXES.filter(p => p.platform === 'unix').map((p, i) => <option key={`u-${i}`} value={p.value}>{p.label}</option>)}
-                </optgroup>
-                <optgroup label="Windows">
-                  {EXEC_PREFIXES.filter(p => p.platform === 'win').map((p, i) => <option key={`w-${i}`} value={p.value}>{p.label}</option>)}
-                </optgroup>
-              </select>
-              <span className="text-gray-300 text-sm self-center">+</span>
               <input value={splitBatch(data.batch).filePath}
                 onChange={e => { const fp = e.target.value; upd({ batch: selectedPrefix ? `${selectedPrefix} ${fp}` : fp }) }}
-                placeholder="選擇或輸入檔案路徑" className={`${inputCls} flex-1`} />
+                placeholder="選擇或輸入腳本路徑" className={`${inputCls} flex-1`} />
               <button onClick={() => setBrowserTarget('batch')}
                 className="shrink-0 w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 transition-colors">
                 <FolderOpen className="w-3.5 h-3.5" /></button>
             </div>
             {data.batch && (
-              <div className="text-xs text-gray-400 font-mono bg-gray-50 rounded-lg px-2.5 py-1.5 truncate">▶ {data.batch}</div>
+              <div className="text-xs text-gray-400 font-mono bg-gray-50 rounded-lg px-2.5 py-1.5 break-all">▶ {data.batch}</div>
             )}
             {pyPath && (
               <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">

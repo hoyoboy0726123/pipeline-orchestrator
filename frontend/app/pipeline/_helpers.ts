@@ -11,6 +11,9 @@ export interface StepData extends Record<string, unknown> {
   expect: string
   skillMode?: boolean   // optional — 僅在 YAML 序列化時使用，節點類型由 node.type 決定
   readonly?: boolean    // optional — skill 唯讀驗證模式
+  humanConfirm?: boolean           // optional — 人工確認步驟
+  humanConfirmMessage?: string     // optional — 確認訊息
+  humanConfirmNotifyTelegram?: boolean  // optional — 是否 Telegram 通知
   timeout: number
   retry: number
   index: number
@@ -41,13 +44,39 @@ export interface AiValidationData extends Record<string, unknown> {
   index: number
 }
 
+/** 人工確認節點：暫停 Pipeline 等待人為確認 */
+export interface HumanConfirmData extends Record<string, unknown> {
+  name: string
+  message: string          // 自訂確認訊息
+  notifyTelegram: boolean  // 是否透過 Telegram 通知
+  timeout: number          // 等待超時（秒）
+  index: number
+  status: 'idle' | 'running' | 'success' | 'failed'
+  errorMsg: string
+}
+
 export type ScriptNode = Node<StepData>
 export type SkillNode = Node<SkillData>
 export type AiValidationNode = Node<AiValidationData>
-export type AppNode = Node<StepData | AiValidationData | SkillData>
+export type HumanConfirmNode = Node<HumanConfirmData>
+export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData>
 
 export function newAiValidationData(index = 0): AiValidationData {
   return { expectText: '', targetPath: '', skillMode: false, index }
+}
+
+let _confirmCounter = 0
+export function newHumanConfirmData(index = 0): HumanConfirmData {
+  _confirmCounter++
+  return {
+    name: `人工確認 ${_confirmCounter}`,
+    message: '',
+    notifyTelegram: true,
+    timeout: 3600,
+    index,
+    status: 'idle',
+    errorMsg: '',
+  }
 }
 
 let _counter = 0
@@ -92,6 +121,22 @@ export const stepColor = (index: number) => COLORS[index % COLORS.length]
 // ── Steps → ReactFlow nodes + edges ──────────────────────────────────────────
 export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[] } {
   const nodes: AppNode[] = steps.map((s, i) => {
+    if (s.humanConfirm) {
+      return {
+        id: `step-${i}`,
+        type: 'humanConfirmation' as const,
+        position: { x: i * 320, y: 160 },
+        data: {
+          name: s.name,
+          message: s.humanConfirmMessage || '',
+          notifyTelegram: s.humanConfirmNotifyTelegram ?? true,
+          timeout: s.timeout || 3600,
+          index: i,
+          status: 'idle' as const,
+          errorMsg: '',
+        } as HumanConfirmData,
+      }
+    }
     if (s.skillMode) {
       // 向後相容：舊格式 skillMode=true → skillStep 節點
       return {
@@ -147,30 +192,36 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
     }
   }
 
-  // 過濾出步驟節點（scriptStep + skillStep）
-  const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep')
-  if (stepNodes.length === 0) return []
+  // 過濾出可執行節點（scriptStep + skillStep + humanConfirmation）
+  const execNodeIds = new Set<string>()
+  const execNodes: AppNode[] = []
+  for (const n of nodes) {
+    if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation') {
+      execNodeIds.add(n.id)
+      execNodes.push(n)
+    }
+  }
+  if (execNodes.length === 0) return []
 
   // 建立虛擬邊（跳過 AI 驗證節點）
-  const stepIds = new Set(stepNodes.map(n => n.id))
   const virtualEdges: Edge[] = []
   for (const e of edges) {
     if (aiNodeIds.has(e.source)) continue
     if (aiNodeIds.has(e.target)) {
       const aiOutEdge = edges.find(e2 => e2.source === e.target)
-      if (aiOutEdge && stepIds.has(aiOutEdge.target)) {
+      if (aiOutEdge && execNodeIds.has(aiOutEdge.target)) {
         virtualEdges.push({ ...e, target: aiOutEdge.target, id: `v-${e.id}` })
       }
       continue
     }
-    if (stepIds.has(e.source) && stepIds.has(e.target)) {
+    if (execNodeIds.has(e.source) && execNodeIds.has(e.target)) {
       virtualEdges.push(e)
     }
   }
 
-  // 找起點（無入邊的步驟節點）
+  // 找起點（無入邊的節點）
   const hasIncoming = new Set(virtualEdges.map(e => e.target))
-  const starts = stepNodes.filter(n => !hasIncoming.has(n.id))
+  const starts = execNodes.filter(n => !hasIncoming.has(n.id))
   if (!starts.length) return []
 
   // 沿邊走，只收集有連接的節點
@@ -182,7 +233,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   let cur: string | undefined = starts[0].id
   while (cur && !visited.has(cur)) {
     visited.add(cur)
-    const node = stepNodes.find(n => n.id === cur)
+    const node = execNodes.find(n => n.id === cur)
     if (node) ordered.push(node)
     cur = adj.get(cur)
   }
@@ -191,6 +242,25 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
 
   return ordered.map((n, i) => {
     const aiData = aiDataByPredecessor.get(n.id)
+
+    if (n.type === 'humanConfirmation') {
+      const d = n.data as HumanConfirmData
+      return {
+        name: d.name,
+        batch: '',
+        workingDir: '',
+        outputPath: '',
+        expect: '',
+        humanConfirm: true,
+        humanConfirmMessage: d.message,
+        humanConfirmNotifyTelegram: d.notifyTelegram,
+        timeout: d.timeout,
+        retry: 0,
+        index: i,
+        status: d.status,
+        errorMsg: d.errorMsg,
+      } as StepData
+    }
 
     if (n.type === 'skillStep') {
       const d = n.data as SkillData
@@ -239,6 +309,13 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
   ]
   for (const s of steps) {
     lines.push(`  - name: ${s.name}`)
+    if (s.humanConfirm) {
+      lines.push(`    human_confirm: true`)
+      if (s.humanConfirmMessage) lines.push(`    message: "${s.humanConfirmMessage.replace(/"/g, '\\"')}"`)
+      if (s.humanConfirmNotifyTelegram === false) lines.push(`    notify_telegram: false`)
+      if (s.timeout && s.timeout !== 3600) lines.push(`    timeout: ${s.timeout}`)
+      continue
+    }
     if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
     if (s.batch) {
       if (s.batch.includes('\n') || s.batch.length > 80) {
@@ -361,6 +438,12 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.skillMode = /true/.test(t)
       } else if (/^readonly:/.test(t) && cur) {
         cur.readonly = /true/.test(t)
+      } else if (/^human_confirm:/.test(t) && cur) {
+        cur.humanConfirm = /true/.test(t)
+      } else if (/^message:/.test(t) && cur) {
+        cur.humanConfirmMessage = t.replace(/^message:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^notify_telegram:/.test(t) && cur) {
+        cur.humanConfirmNotifyTelegram = /true/.test(t)
       } else if (/^timeout:/.test(t) && cur) {
         cur.timeout = parseInt(t.replace(/^timeout:\s*/, '')) || 300
         inOutput = false
@@ -391,7 +474,10 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     expect: partial.expect ?? '',
     skillMode: partial.skillMode ?? false,
     readonly: partial.readonly ?? false,
-    timeout: partial.timeout ?? 300,
+    humanConfirm: partial.humanConfirm ?? false,
+    humanConfirmMessage: partial.humanConfirmMessage ?? '',
+    humanConfirmNotifyTelegram: partial.humanConfirmNotifyTelegram ?? true,
+    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : 300),
     retry: partial.retry ?? 0,
     index,
     status: 'idle',

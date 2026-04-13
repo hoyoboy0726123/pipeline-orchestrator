@@ -164,11 +164,13 @@ export async function deletePipelineRun(runId: string): Promise<void> {
   if (!res.ok) throw new Error('刪除失敗')
 }
 
-export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort'): Promise<{ message: string }> {
+export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint', hint?: string): Promise<{ message: string }> {
+  const body: Record<string, string> = { decision }
+  if (hint) body.hint = hint
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/resume`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error('Resume 失敗')
   return res.json()
@@ -424,6 +426,29 @@ export async function getRecipeStatus(pipelineName: string, stepNames: string[])
   const params = new URLSearchParams({ steps: stepNames.join(',') })
   const res = await fetch(`${BASE}/recipes/status/${encodeURIComponent(pipelineName)}?${params}`)
   if (!res.ok) throw new Error('查詢 recipe 狀態失敗')
+  return res.json()
+}
+
+// ── Notification Settings ──────────────────────────────────
+export interface NotificationSettings {
+  telegram_bot_token: string
+  telegram_chat_id: string
+  line_notify_token: string
+}
+
+export async function getNotificationSettings(): Promise<NotificationSettings> {
+  const res = await fetch(`${BASE}/settings/notifications`)
+  if (!res.ok) throw new Error('讀取通知設定失敗')
+  return res.json()
+}
+
+export async function saveNotificationSettings(s: Partial<NotificationSettings>): Promise<NotificationSettings> {
+  const res = await fetch(`${BASE}/settings/notifications`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(s),
+  })
+  if (!res.ok) throw new Error('儲存通知設定失敗')
   return res.json()
 }
 

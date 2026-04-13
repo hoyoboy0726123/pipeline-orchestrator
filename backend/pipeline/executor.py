@@ -27,6 +27,41 @@ from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 SKILL_TOOL_TIMEOUT = 60
 SKILL_MAX_ITERATIONS = 15
 
+# ── Per-run subprocess tracking（for immediate abort）─────────────────────────
+import threading
+
+_proc_lock = threading.Lock()
+_running_procs: dict[str, list] = {}  # run_id → list of (subprocess.Popen | asyncio.subprocess.Process)
+
+
+def register_proc(run_id: str, proc):
+    """註冊一個正在執行的子進程，供 abort 時立即 kill"""
+    with _proc_lock:
+        _running_procs.setdefault(run_id, []).append(proc)
+
+
+def unregister_proc(run_id: str, proc):
+    """反註冊子進程"""
+    with _proc_lock:
+        if run_id in _running_procs:
+            try:
+                _running_procs[run_id].remove(proc)
+            except ValueError:
+                pass
+            if not _running_procs[run_id]:
+                del _running_procs[run_id]
+
+
+def kill_run_processes(run_id: str):
+    """立即終止指定 run 的所有子進程"""
+    with _proc_lock:
+        procs = _running_procs.pop(run_id, [])
+    for proc in procs:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
 # Skill 模式需要的核心套件（探測用，從 skill_packages.txt 讀取）
 def _load_skill_required_pkgs() -> tuple[str, ...]:
     pkg_file = Path(__file__).parent.parent / "skill_packages.txt"
@@ -164,6 +199,7 @@ async def execute_step(
     timeout: int,
     logger: logging.Logger,
     step_name: str,
+    run_id: str = "",
 ) -> ExecResult:
     """
     執行 shell 命令，串流輸出到 logger，回傳完整結果。
@@ -173,6 +209,7 @@ async def execute_step(
         timeout:   最大執行秒數
         logger:    file logger（記錄完整輸出）
         step_name: 用於 log 標籤
+        run_id:    pipeline run id（用於立即中止追蹤）
 
     Returns:
         ExecResult(exit_code, stdout, stderr)
@@ -193,6 +230,8 @@ async def execute_step(
             stderr=asyncio.subprocess.PIPE,
             env=_clean_env(),
         )
+        if run_id:
+            register_proc(run_id, proc)
 
         async def _drain(stream: asyncio.StreamReader, buf: list[str], tag: str):
             while True:
@@ -218,11 +257,16 @@ async def execute_step(
             except ProcessLookupError:
                 pass
             logger.error(f"[{step_name}] ⏱ 執行超時（>{timeout}s），已強制終止")
+            if run_id:
+                unregister_proc(run_id, proc)
             return ExecResult(
                 exit_code=-1,
                 stdout="\n".join(stdout_lines),
                 stderr=f"執行超時（>{timeout}s）",
             )
+
+        if run_id:
+            unregister_proc(run_id, proc)
 
         exit_code = proc.returncode if proc.returncode is not None else -99
         level = logging.INFO if exit_code == 0 else logging.WARNING
@@ -262,7 +306,7 @@ def _get_skill_llm():
     return _skill_llm
 
 
-def _skill_run_python(code: str, cwd: Optional[str] = None) -> str:
+def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "") -> str:
     """在 subprocess 中執行 Python 程式碼。"""
     # 截斷混入程式碼中的 <tool> 標籤（LLM 有時在 run_python 輸入末尾附加 <tool>done</tool>）
     tool_tag_pos = code.find('<tool>')
@@ -282,32 +326,42 @@ def _skill_run_python(code: str, cwd: Optional[str] = None) -> str:
     )
     code = preamble + code
     tmp_path = None
+    proc = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write(code)
             tmp_path = f.name
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [_SKILL_PYTHON, tmp_path],
-            capture_output=True, text=True,
-            timeout=SKILL_TOOL_TIMEOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
             env=_clean_env(),
             cwd=cwd,
         )
+        if run_id:
+            register_proc(run_id, proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=SKILL_TOOL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return f"[錯誤] Python 執行超時（>{SKILL_TOOL_TIMEOUT}秒）"
+        finally:
+            if run_id and proc:
+                unregister_proc(run_id, proc)
         output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
+        if stdout:
+            output += stdout
+        if stderr:
             # 區分錯誤 vs 警告：exit code 0 + stderr 只有警告不該讓 LLM 以為失敗
-            tag = "stderr" if result.returncode != 0 else "warnings"
-            output += f"\n[{tag}]\n{result.stderr}"
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
-        elif not result.stdout:
+            tag = "stderr" if proc.returncode != 0 else "warnings"
+            output += f"\n[{tag}]\n{stderr}"
+        if proc.returncode != 0:
+            output += f"\n[exit code: {proc.returncode}]"
+        elif not stdout:
             # 成功執行但沒輸出 → 明確告訴 LLM 任務已完成，避免誤以為失敗
             output += "\n[執行成功，程式無 stdout 輸出]"
         return output.strip() or "(無輸出)"
-    except subprocess.TimeoutExpired:
-        return f"[錯誤] Python 執行超時（>{SKILL_TOOL_TIMEOUT}秒）"
     except Exception as e:
         return f"[錯誤] Python 執行失敗：{e}"
     finally:
@@ -315,29 +369,39 @@ def _skill_run_python(code: str, cwd: Optional[str] = None) -> str:
             Path(tmp_path).unlink(missing_ok=True)
 
 
-def _skill_run_shell(cmd: str, cwd: Optional[str] = None) -> str:
+def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "") -> str:
     """執行 shell 命令。"""
     first_word = cmd.strip().split()[0] if cmd.strip() else ""
     if first_word in _DANGEROUS_COMMANDS:
         return f"[拒絕] 命令 '{first_word}' 被安全策略封鎖"
     # 把 python/python3/py 開頭的指令改用 _SKILL_PYTHON（有 pandas 等套件的 interpreter）
     cmd = _rewrite_python_cmd(cmd)
+    proc = None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd, shell=True,
-            capture_output=True, text=True,
-            timeout=SKILL_TOOL_TIMEOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
             env=_clean_env(),
             cwd=cwd,
         )
+        if run_id:
+            register_proc(run_id, proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=SKILL_TOOL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return f"[錯誤] 命令執行超時（>{SKILL_TOOL_TIMEOUT}秒）"
+        finally:
+            if run_id and proc:
+                unregister_proc(run_id, proc)
         output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
+        if stdout:
+            output += stdout
+        if stderr:
+            output += f"\n[stderr]\n{stderr}"
         return output.strip()[:5000] or "(無輸出)"
-    except subprocess.TimeoutExpired:
-        return f"[錯誤] 命令執行超時（>{SKILL_TOOL_TIMEOUT}秒）"
     except Exception as e:
         return f"[錯誤] 命令執行失敗：{e}"
 
@@ -511,12 +575,12 @@ def _parse_skill_tool_calls(text: str) -> list[dict]:
     return calls
 
 
-def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = None) -> str:
+def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = None, run_id: str = "") -> str:
     """執行單一工具。"""
     if tool_name == "run_python":
-        return _skill_run_python(tool_input, cwd=cwd)
+        return _skill_run_python(tool_input, cwd=cwd, run_id=run_id)
     elif tool_name == "run_shell":
-        return _skill_run_shell(tool_input, cwd=cwd)
+        return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id)
     elif tool_name == "read_file":
         return _skill_read_file(tool_input)
     elif tool_name == "done":
@@ -537,6 +601,7 @@ async def execute_step_with_skill(
     use_recipe: bool = True,
     no_save_recipe: bool = False,
     readonly: bool = False,
+    run_id: str = "",
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -603,7 +668,7 @@ async def execute_step_with_skill(
                 t0 = _time.time()
                 loop = asyncio.get_event_loop()
                 tool_result = await loop.run_in_executor(
-                    None, lambda: _skill_run_python(cached["code"], cwd=working_dir)
+                    None, lambda: _skill_run_python(cached["code"], cwd=working_dir, run_id=run_id)
                 )
                 runtime = _time.time() - t0
                 # 成功條件：輸出檔存在（若有指定）且無 [exit code: X]
@@ -879,7 +944,7 @@ async def execute_step_with_skill(
             # 執行工具
             logger.info(f"[{step_name}] 工具呼叫：{tool_name}")
             tool_result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda tn=tool_name, ti=tool_input: _execute_skill_tool(tn, ti, cwd=working_dir)
+                None, lambda tn=tool_name, ti=tool_input: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id)
             )
             logger.debug(f"[{step_name}] 工具結果：{tool_result[:300]}...")
             all_stdout.append(f"[{tool_name}] {tool_result}")

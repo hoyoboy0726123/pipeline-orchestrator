@@ -31,6 +31,7 @@ function migrateNodes(nodes: AppNode[]): AppNode[] {
             workingDir: d.workingDir ?? '',
             outputPath: d.outputPath ?? '',
             expectedOutput: d.expect ?? '',
+            readonly: d.readonly ?? false,
             timeout: d.timeout ?? 300,
             retry: d.retry ?? 0,
             index: d.index ?? 0,
@@ -41,6 +42,7 @@ function migrateNodes(nodes: AppNode[]): AppNode[] {
       }
       return { ...n, type: 'scriptStep' as const }
     }
+    // humanConfirmation 節點不需遷移，直接保留
     return n
   })
 }

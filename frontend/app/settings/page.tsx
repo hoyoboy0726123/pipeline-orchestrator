@@ -1,13 +1,14 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2, Sparkles } from 'lucide-react'
+import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2, Sparkles, MessageSquare, Bell } from 'lucide-react'
 import Link from 'next/link'
 import { toast, Toaster } from 'sonner'
 import {
   getModelSettings, saveModelSettings, getAvailableModels,
   getSkillPackages, addSkillPackage, removeSkillPackage,
-  type ModelSettings, type AvailableModels, type SkillPackage,
+  getNotificationSettings, saveNotificationSettings,
+  type ModelSettings, type AvailableModels, type SkillPackage, type NotificationSettings,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -151,6 +152,145 @@ function SkillPackagesSection() {
           </p>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Notification Settings Section ────────────────────────────────────────────
+function NotificationSection() {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [tgToken, setTgToken] = useState('')
+  const [tgChatId, setTgChatId] = useState('')
+  const [lineToken, setLineToken] = useState('')
+  const [original, setOriginal] = useState<NotificationSettings | null>(null)
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true)
+      try {
+        const s = await getNotificationSettings()
+        setTgToken(s.telegram_bot_token)
+        setTgChatId(s.telegram_chat_id)
+        setLineToken(s.line_notify_token)
+        setOriginal(s)
+      } catch (e) { toast.error((e as Error).message) }
+      finally { setLoading(false) }
+    })()
+  }, [])
+
+  const dirty = original && (
+    tgToken !== original.telegram_bot_token ||
+    tgChatId !== original.telegram_chat_id ||
+    lineToken !== original.line_notify_token
+  )
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const saved = await saveNotificationSettings({
+        telegram_bot_token: tgToken,
+        telegram_chat_id: tgChatId,
+        line_notify_token: lineToken,
+      })
+      setOriginal(saved)
+      toast.success('通知設定已儲存')
+    } catch (e) { toast.error((e as Error).message) }
+    finally { setSaving(false) }
+  }
+
+  const inputCls = 'flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent'
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
+          <Bell className="w-5 h-5 text-emerald-700" />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">通知設定</h2>
+          <p className="text-sm text-gray-500">設定 Pipeline 通知管道（人工確認節點、失敗通知）</p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400">
+          <RefreshCw className="w-5 h-5 animate-spin inline-block mr-2" />載入中...
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          {/* Telegram */}
+          <div className="p-5 border-b border-gray-100">
+            <div className="flex items-center gap-2 mb-3">
+              <MessageSquare className="w-4 h-4 text-blue-500" />
+              <span className="text-sm font-semibold text-gray-800">Telegram Bot</span>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Bot Token</label>
+                <input
+                  type="password"
+                  value={tgToken}
+                  onChange={e => setTgToken(e.target.value)}
+                  placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+                  className={inputCls + ' w-full'}
+                />
+                <p className="text-xs text-gray-400 mt-1">從 <code className="bg-gray-100 px-1 py-0.5 rounded">@BotFather</code> 取得</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Chat ID</label>
+                <input
+                  value={tgChatId}
+                  onChange={e => setTgChatId(e.target.value)}
+                  placeholder="123456789"
+                  className={inputCls + ' w-full'}
+                />
+                <p className="text-xs text-gray-400 mt-1">你的 Telegram 用戶 ID 或群組 ID，可透過 <code className="bg-gray-100 px-1 py-0.5 rounded">@userinfobot</code> 取得</p>
+              </div>
+            </div>
+          </div>
+
+          {/* LINE（預留） */}
+          <div className="p-5 border-b border-gray-100 opacity-60">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-lg leading-none">🟢</span>
+              <span className="text-sm font-semibold text-gray-800">LINE Notify</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">即將推出</span>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Access Token</label>
+              <input
+                value={lineToken}
+                onChange={e => setLineToken(e.target.value)}
+                placeholder="尚未支援，敬請期待"
+                disabled
+                className={inputCls + ' w-full bg-gray-50 cursor-not-allowed'}
+              />
+              <p className="text-xs text-gray-400 mt-1">LINE Notify 整合開發中</p>
+            </div>
+          </div>
+
+          {/* 儲存按鈕 */}
+          <div className="px-5 py-4 bg-gray-50/50 flex items-center justify-between">
+            <div className="text-xs text-gray-500">
+              {dirty ? '有未儲存的變更' : '尚無變更'}
+            </div>
+            <button
+              onClick={handleSave}
+              disabled={saving || !dirty}
+              className={cn(
+                'px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-all',
+                dirty && !saving
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+              )}
+            >
+              {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              儲存通知設定
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -475,6 +615,9 @@ export default function SettingsPage() {
 
         {/* Skill Packages */}
         <SkillPackagesSection />
+
+        {/* Notifications */}
+        <NotificationSection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">

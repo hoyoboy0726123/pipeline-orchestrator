@@ -30,10 +30,52 @@ from .validator import validate_step, validate_step_with_skill, ValidationResult
 # ── Abort flags（in-memory）────────────────────────────────────────────────────
 _abort_flags: set[str] = set()
 
+# ── Running task tracking（for immediate cancel）──────────────────────────────
+_running_tasks: dict[str, asyncio.Task] = {}
+
+
+def register_task(run_id: str, task: asyncio.Task):
+    _running_tasks[run_id] = task
+
+
+def unregister_task(run_id: str):
+    _running_tasks.pop(run_id, None)
+
 
 def request_abort(run_id: str):
     """前端/API 呼叫：標記此 run 需要中止"""
     _abort_flags.add(run_id)
+
+
+async def force_abort(run_id: str):
+    """立即中止：kill 子進程 + cancel asyncio task + 更新狀態"""
+    from .executor import kill_run_processes
+    _abort_flags.add(run_id)
+    # 1. 立即 kill 所有子進程
+    kill_run_processes(run_id)
+    # 2. Cancel asyncio task
+    task = _running_tasks.pop(run_id, None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    # 3. 更新 run 狀態
+    store = get_store()
+    run = store.load(run_id)
+    if run and run.status in ("running", "awaiting_human"):
+        run.status = "aborted"
+        run.ended_at = datetime.now().isoformat()
+        store.save(run)
+        logger = logging.getLogger(f"pipeline.{run_id}")
+        logger.info("⛔ Pipeline 被立即中止（force abort）")
+        try:
+            config = PipelineConfig.from_dict(run.config_dict)
+            await _notify_final(run, config)
+        except Exception:
+            pass
+    clear_abort(run_id)
 
 
 def is_abort_requested(run_id: str) -> bool:
@@ -47,19 +89,65 @@ def clear_abort(run_id: str):
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
 def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔄 重試此步驟", callback_data=f"pipe_retry:{run_id}"),
-        InlineKeyboardButton("⏩ 跳過此步驟", callback_data=f"pipe_skip:{run_id}"),
-        InlineKeyboardButton("🛑 中止",       callback_data=f"pipe_abort:{run_id}"),
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 重試", callback_data=f"pipe_retry:{run_id}"),
+            InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"),
+        ],
+        [
+            InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}"),
+            InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"),
+        ],
+    ])
+
+
+def _confirm_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ 繼續執行", callback_data=f"pipe_continue:{run_id}"),
+            InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"),
+        ],
+        [
+            InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}"),
+            InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"),
+        ],
+    ])
+
+
+def _get_tg_token() -> str:
+    """取得 Telegram Bot Token（優先用 settings UI 設定，fallback 到 env）"""
+    try:
+        from settings import get_settings
+        token = get_settings().get("telegram_bot_token", "")
+        if token:
+            return token
+    except Exception:
+        pass
+    return TELEGRAM_BOT_TOKEN
+
+
+def _get_tg_chat_id() -> int:
+    """取得 Telegram Chat ID（從 settings UI 讀取）"""
+    try:
+        from settings import get_settings
+        cid = get_settings().get("telegram_chat_id", "")
+        if cid:
+            return int(cid)
+    except Exception:
+        pass
+    return 0
 
 
 async def _tg_send(chat_id: int, text: str, reply_markup=None):
     """發送 Telegram 訊息（錯誤靜默記錄，不拋出）"""
-    if not chat_id or not TELEGRAM_BOT_TOKEN:
+    token = _get_tg_token()
+    # 如果沒傳 chat_id，嘗試從 settings 取得
+    if not chat_id:
+        chat_id = _get_tg_chat_id()
+    if not chat_id or not token:
         return
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=token)
         await bot.send_message(
             chat_id=chat_id,
             text=text,
@@ -197,6 +285,24 @@ def _deterministic_validate(step, exec_result, logger) -> ValidationResult:
     )
 
 
+def get_run_log_tail(run_id: str, lines: int = 30) -> str:
+    """取得 pipeline 執行 log 的最後 N 行（供 Telegram 查看）"""
+    store = get_store()
+    run = store.load(run_id)
+    if not run or not run.log_path:
+        return "（找不到 log）"
+    from pathlib import Path as _Path
+    log_file = _Path(run.log_path)
+    if not log_file.exists():
+        return "（log 檔案不存在）"
+    try:
+        all_lines = log_file.read_text(encoding="utf-8").splitlines()
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return "\n".join(tail)
+    except Exception as e:
+        return f"（讀取失敗：{e}）"
+
+
 # ── Main pipeline engine ──────────────────────────────────────────────────────
 
 async def run_pipeline(
@@ -249,12 +355,35 @@ async def run_pipeline(
     # ── Step loop ────────────────────────────────────────────
     completed_outputs: list[dict] = []  # 收集前步驟的輸出資訊
 
+    # 恢復執行時，重建已完成步驟的輸出資訊（供後續步驟參考）
+    if start_from_step > 0:
+        from pathlib import Path as _Path
+        for i in range(start_from_step):
+            prev_step = config.steps[i] if i < len(config.steps) else None
+            if prev_step and not prev_step.human_confirm and prev_step.output and prev_step.output.path:
+                p = _Path(prev_step.output.path).expanduser()
+                out_info = {"path": str(p), "schema": ""}
+                try:
+                    if p.suffix == ".csv" and p.exists():
+                        with open(p, "r") as f:
+                            out_info["schema"] = f.readline().strip()
+                    elif p.suffix in (".xlsx", ".xls") and p.exists():
+                        out_info["schema"] = "Excel 工作簿"
+                    elif p.suffix in (".png", ".jpg", ".jpeg") and p.exists():
+                        out_info["schema"] = "圖片檔案"
+                except Exception:
+                    pass
+                completed_outputs.append(out_info)
+        if completed_outputs:
+            logger.info(f"已重建 {len(completed_outputs)} 個前步驟的輸出資訊：{[o['path'] for o in completed_outputs]}")
+
     no_save_recipe = run.config_dict.get("_no_save_recipe", False)
 
     while run.current_step < len(config.steps):
         # ── 每步開始前檢查中止旗標 ──
         if is_abort_requested(run.run_id):
             clear_abort(run.run_id)
+            unregister_task(run.run_id)
             run.status = "aborted"
             run.ended_at = datetime.now().isoformat()
             store.save(run)
@@ -266,6 +395,64 @@ async def run_pipeline(
         step_num = run.current_step + 1
         total = len(config.steps)
         logger.info(f"══ 步驟 {step_num}/{total}：{step.name} ══")
+
+        # ── 人工確認節點：暫停等待確認 ──
+        if step.human_confirm:
+            logger.info(f"[{step.name}] ✋ 人工確認節點，暫停等待確認")
+
+            # 收集前一步結果摘要
+            prev_summary = ""
+            if run.step_results:
+                prev = run.step_results[-1]
+                status_icon = {"ok": "✅", "failed": "❌"}.get(prev.validation_status, "⚠️")
+                prev_summary = (
+                    f"前一步驟：{prev.step_name}\n"
+                    f"狀態：{status_icon} {prev.validation_status}\n"
+                    f"原因：{prev.validation_reason or '（無）'}\n"
+                )
+                if prev.stdout_tail:
+                    prev_summary += f"輸出摘要：{prev.stdout_tail[-300:]}\n"
+
+            confirm_msg = step.message or "請確認上一步結果是否正確，再繼續執行"
+            full_message = f"{prev_summary}\n📋 {confirm_msg}"
+
+            run.status = "awaiting_human"
+            run.awaiting_type = "human_confirm"
+            run.awaiting_message = confirm_msg
+            store.save(run)
+
+            # Telegram 通知
+            if step.notify_telegram:
+                tg_text = (
+                    f"✋ <b>Pipeline 等待確認</b>\n\n"
+                    f"📋 {run.pipeline_name}\n"
+                    f"📍 步驟 {step_num}/{total}：<b>{step.name}</b>\n\n"
+                )
+                if prev_summary:
+                    tg_text += f"{prev_summary}\n"
+                tg_text += f"💬 {confirm_msg}\n\n請選擇："
+                await _tg_send(run.telegram_chat_id, tg_text, _confirm_keyboard(run.run_id))
+
+            # 記錄此步驟的結果（標記為等待中）
+            step_result = StepResult(
+                step_index=run.current_step,
+                step_name=step.name,
+                exit_code=0,
+                stdout_tail="等待人工確認",
+                stderr_tail="",
+                validation_status="ok",
+                validation_reason="人工確認節點 — 等待中",
+                validation_suggestion="",
+                retries_used=0,
+            )
+            if len(run.step_results) > run.current_step:
+                run.step_results[run.current_step] = step_result
+            else:
+                run.step_results.append(step_result)
+            store.save(run)
+            unregister_task(run.run_id)
+            return run.run_id  # 暫停，等 resume_pipeline 被呼叫
+
         logger.debug(f"[{step.name}] batch 全文（{len(step.batch)} 字元）：{step.batch[:500]}")
 
         retries_used = 0
@@ -273,23 +460,29 @@ async def run_pipeline(
         # Retry loop for this step
         while True:
             if step.skill_mode:
-                # working_dir: 優先用 step 指定，fallback 到 output_path 的目錄
+                from pathlib import Path as _Path
+                # 預設工作目錄：~/ai_output/{pipeline_name}/
+                default_wd = str(_Path.home() / "ai_output" / config.name)
+                # working_dir: 優先用 step 指定 → output_path 的目錄 → 預設目錄
                 wd = step.working_dir
                 if not wd and step.output and step.output.path:
-                    from pathlib import Path as _Path
-                    wd = str(_Path(step.output.path).parent)
+                    wd = str(_Path(step.output.path).expanduser().parent)
+                if not wd:
+                    wd = default_wd
+                _Path(wd).mkdir(parents=True, exist_ok=True)
                 exec_result = await execute_step_with_skill(
                     task_description=step.batch,
                     timeout=step.timeout,
                     logger=logger,
                     step_name=step.name,
                     output_path=step.output.path if step.output else None,
-                    working_dir=wd or None,
+                    working_dir=wd,
                     prev_outputs=completed_outputs if completed_outputs else None,
                     pipeline_id=workflow_id or config.name,
                     use_recipe=use_recipe,
                     no_save_recipe=no_save_recipe,
                     readonly=step.readonly,
+                    run_id=run.run_id,
                 )
             else:
                 exec_result = await execute_step(
@@ -297,6 +490,7 @@ async def run_pipeline(
                     timeout=step.timeout,
                     logger=logger,
                     step_name=step.name,
+                    run_id=run.run_id,
                 )
 
             # 快速模式：Recipe 命中 + 執行成功 → 確定性驗證（不叫 LLM）
@@ -400,12 +594,16 @@ async def run_pipeline(
                 # 重試耗盡，暫停等待人為決策
                 logger.warning(f"步驟 {step_num} 失敗且重試次數耗盡，等待人為決策")
                 run.status = "awaiting_human"
+                run.awaiting_type = "failure"
+                run.awaiting_message = val.reason or ""
                 store.save(run)
                 await _notify_failure(run, val, step.name)
+                unregister_task(run.run_id)
                 return run.run_id  # 暫停
 
     # ── 全部步驟完成 ─────────────────────────────────────────
     clear_abort(run.run_id)
+    unregister_task(run.run_id)
     run.status = "completed"
     run.ended_at = datetime.now().isoformat()
     store.save(run)
@@ -416,13 +614,14 @@ async def run_pipeline(
 
 # ── Human-in-the-loop resume ─────────────────────────────────────────────────
 
-async def resume_pipeline(run_id: str, decision: str) -> str:
+async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
     """
     用戶透過 Telegram inline keyboard 做出決策後，呼叫此函式繼續執行。
 
     Args:
         run_id:   pipeline run id
-        decision: "retry" | "skip" | "abort"
+        decision: "retry" | "skip" | "abort" | "continue" | "retry_with_hint"
+        hint:     補充指示（retry_with_hint 時使用）
 
     Returns:
         str 回應訊息（回覆給用戶）
@@ -460,23 +659,101 @@ async def resume_pipeline(run_id: str, decision: str) -> str:
             await _notify_final(run, config)
             return f"⏩ 跳過最後一步，Pipeline 完成"
 
-        asyncio.create_task(run_pipeline(
+        t = asyncio.create_task(run_pipeline(
             config_dict=run.config_dict,
             chat_id=run.telegram_chat_id,
             run_id=run.run_id,
             start_from_step=next_step,
         ))
+        register_task(run.run_id, t)
         return f"⏩ 跳過步驟 {step_num}，繼續執行步驟 {step_num + 1}/{total}"
 
     elif decision == "retry":
         logger = logging.getLogger(f"pipeline.{run_id}")
         logger.info(f"用戶選擇重試步驟 {step_num}")
-        asyncio.create_task(run_pipeline(
+        t = asyncio.create_task(run_pipeline(
             config_dict=run.config_dict,
             chat_id=run.telegram_chat_id,
             run_id=run.run_id,
             start_from_step=run.current_step,
         ))
+        register_task(run.run_id, t)
         return f"🔄 重試步驟 {step_num}/{total}"
+
+    elif decision == "retry_with_hint":
+        logger = logging.getLogger(f"pipeline.{run_id}")
+        config_d = run.config_dict.copy()
+        steps = config_d.get("steps", [])
+
+        is_confirm = run.awaiting_type == "human_confirm"
+
+        if is_confirm:
+            # 人工確認節點的補充指示：回到前一個可執行步驟重做
+            prev_step = run.current_step - 1
+            while prev_step >= 0 and steps[prev_step].get("human_confirm"):
+                prev_step -= 1
+            if prev_step < 0:
+                return "⚠️ 確認節點前沒有可重做的步驟"
+            logger.info(f"用戶補充指示重做步驟 {prev_step + 1}：{hint}")
+            target = prev_step
+        else:
+            # 失敗步驟的補充指示：附加到當前步驟並重試
+            logger.info(f"用戶補充指示重試步驟 {step_num}：{hint}")
+            target = run.current_step
+
+        if target < len(steps):
+            original_batch = steps[target].get("batch", "")
+            steps[target]["batch"] = (
+                f"{original_batch}\n\n"
+                f"【用戶補充指示】{hint}"
+            )
+            config_d["steps"] = steps
+
+        run.config_dict = config_d
+        run.awaiting_type = ""
+        run.awaiting_message = ""
+        store.save(run)
+        t = asyncio.create_task(run_pipeline(
+            config_dict=config_d,
+            chat_id=run.telegram_chat_id,
+            run_id=run.run_id,
+            start_from_step=target,
+        ))
+        register_task(run.run_id, t)
+        if is_confirm:
+            return f"💬 已附加指示，重做步驟 {target + 1}/{total}"
+        else:
+            return f"💬 已附加指示，重試步驟 {step_num}/{total}"
+
+    elif decision == "continue":
+        # 人工確認通過 → 繼續下一步
+        logger = logging.getLogger(f"pipeline.{run_id}")
+        logger.info(f"用戶確認通過步驟 {step_num}，繼續執行")
+
+        # 更新確認步驟結果
+        if run.current_step < len(run.step_results):
+            run.step_results[run.current_step].validation_reason = "人工確認 — 已通過"
+            run.step_results[run.current_step].stdout_tail = "已確認通過"
+
+        run.awaiting_type = ""
+        run.awaiting_message = ""
+        next_step = run.current_step + 1
+
+        if next_step >= total:
+            run.status = "completed"
+            run.ended_at = datetime.now().isoformat()
+            store.save(run)
+            await _notify_final(run, config)
+            return f"✅ 確認通過，Pipeline 全部完成"
+
+        store.save(run)
+        t = asyncio.create_task(run_pipeline(
+            config_dict=run.config_dict,
+            chat_id=run.telegram_chat_id,
+            run_id=run.run_id,
+            start_from_step=next_step,
+        ))
+        register_task(run.run_id, t)
+        return f"✅ 確認通過，繼續執行步驟 {next_step + 1}/{total}"
 
     return "❓ 未知決策"

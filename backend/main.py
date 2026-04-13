@@ -36,11 +36,16 @@ async def startup():
     auto_install_packages()
     await sched_start()
     print("✅ Pipeline Scheduler 已啟動")
+    from telegram_handler import start_polling as tg_start
+    await tg_start()
+    print("✅ Telegram callback polling 已啟動")
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await sched_shutdown()
+    from telegram_handler import stop_polling as tg_stop
+    await tg_stop()
 
 
 # ── Health ───────────────────────────────────────────────────
@@ -162,6 +167,48 @@ async def remove_skill_package(pkg_name: str):
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"message": msg}
+
+
+# ── Notification Settings ──────────────────────────────────
+class NotificationSettingsRequest(BaseModel):
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    line_notify_token: Optional[str] = None
+
+
+@app.get("/settings/notifications")
+async def get_notification_settings():
+    from settings import get_settings
+    s = get_settings()
+    return {
+        "telegram_bot_token": s.get("telegram_bot_token", ""),
+        "telegram_chat_id": s.get("telegram_chat_id", ""),
+        "line_notify_token": s.get("line_notify_token", ""),
+    }
+
+
+@app.put("/settings/notifications")
+async def put_notification_settings(req: NotificationSettingsRequest):
+    from settings import get_settings, _SETTINGS_PATH, _lock
+    import json as _json
+    import settings as _settings_mod
+    s = get_settings()
+    if req.telegram_bot_token is not None:
+        s["telegram_bot_token"] = req.telegram_bot_token.strip()
+    if req.telegram_chat_id is not None:
+        s["telegram_chat_id"] = req.telegram_chat_id.strip()
+    if req.line_notify_token is not None:
+        s["line_notify_token"] = req.line_notify_token.strip()
+    with _lock:
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            _json.dump(s, f, ensure_ascii=False, indent=2)
+        _settings_mod._cache = s
+    return {
+        "telegram_bot_token": s.get("telegram_bot_token", ""),
+        "telegram_chat_id": s.get("telegram_chat_id", ""),
+        "line_notify_token": s.get("line_notify_token", ""),
+    }
 
 
 # ── Workflows CRUD ──────────────────────────────────────────
@@ -416,7 +463,8 @@ class PipelineRunRequest(BaseModel):
 
 
 class PipelineDecisionRequest(BaseModel):
-    decision: str  # retry | skip | abort
+    decision: str  # retry | skip | abort | continue | retry_with_hint
+    hint: Optional[str] = None  # 補充指示（retry_with_hint 時使用）
 
 
 @app.post("/pipeline/run")
@@ -457,7 +505,9 @@ async def start_pipeline(req: PipelineRunRequest):
     get_store().save(run)
 
     # 背景執行（runner 看到已存在的 run_id 會恢復執行）
-    asyncio.create_task(run_pipeline(config_d, chat_id=0, run_id=run_id))
+    from pipeline.runner import register_task
+    task = asyncio.create_task(run_pipeline(config_d, chat_id=0, run_id=run_id))
+    register_task(run_id, task)
 
     return {"run_id": run_id, "message": f"Pipeline '{config.name}' 已啟動"}
 
@@ -488,31 +538,25 @@ async def delete_pipeline_run(run_id: str):
 
 @app.post("/pipeline/runs/{run_id}/resume")
 async def resume_pipeline_run(run_id: str, req: PipelineDecisionRequest):
-    if req.decision not in ("retry", "skip", "abort"):
-        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort")
+    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint"):
+        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint")
     from pipeline.runner import resume_pipeline
-    msg = await resume_pipeline(run_id, req.decision)
+    msg = await resume_pipeline(run_id, req.decision, hint=req.hint or "")
     return {"message": msg}
 
 
 @app.post("/pipeline/runs/{run_id}/abort")
 async def abort_pipeline_run(run_id: str):
-    """中止正在執行的 pipeline（不限狀態）"""
+    """立即中止正在執行的 pipeline（kill 子進程 + cancel task）"""
     from pipeline.store import get_store
-    from pipeline.runner import request_abort
+    from pipeline.runner import force_abort
     run = get_store().load(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="找不到 pipeline run")
     if run.status not in ("running", "awaiting_human"):
         raise HTTPException(status_code=400, detail=f"Pipeline 狀態為 {run.status}，無法中止")
-    if run.status == "awaiting_human":
-        # 直接中止等待中的 pipeline
-        from pipeline.runner import resume_pipeline
-        msg = await resume_pipeline(run_id, "abort")
-        return {"message": msg}
-    # running → 設置中止旗標，runner 下一步迴圈會檢查
-    request_abort(run_id)
-    return {"message": f"已發送中止請求，Pipeline 將在當前步驟完成後停止"}
+    await force_abort(run_id)
+    return {"message": "⛔ Pipeline 已立即中止"}
 
 
 @app.post("/pipeline/runs/{run_id}/save-recipes")
@@ -718,4 +762,6 @@ def _run_to_dict(r):
         "config_dict": r.config_dict,
         "log_path": r.log_path,
         "pending_recipes": getattr(r, 'pending_recipes', []) or [],
+        "awaiting_type": getattr(r, 'awaiting_type', '') or '',
+        "awaiting_message": getattr(r, 'awaiting_message', '') or '',
     }

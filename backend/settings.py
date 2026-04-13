@@ -14,8 +14,12 @@ _DEFAULT = {
     "provider": "groq",           # "groq" | "ollama"
     "model": GROQ_MODEL_MAIN,      # e.g. "meta-llama/llama-4-scout-17b-16e-instruct" or "qwen3:8b"
     "ollama_base_url": "http://localhost:11434",
-    "ollama_thinking": "off",      # "auto" | "on" | "off" — 預設關閉，避免 thinking 模式 rambling 卡死
+    "ollama_thinking": "off",      # "auto" | "on" | "off" — 預���關閉，避免 thinking 模式 rambling 卡��
     "ollama_num_ctx": 16384,       # Ollama context window tokens（僅 Ollama）
+    # 通知設定
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "line_notify_token": "",       # LINE Notify（預留）
 }
 
 _cache: Optional[dict] = None
@@ -63,20 +67,21 @@ def update_settings(
     if not isinstance(num_ctx, int) or num_ctx < 2048 or num_ctx > 262144:
         raise ValueError(f"invalid ollama_num_ctx: {num_ctx}（需介於 2048~262144）")
 
-    new_settings = {
-        "provider": provider,
-        "model": model.strip(),
-        "ollama_base_url": (ollama_base_url or _DEFAULT["ollama_base_url"]).strip(),
-        "ollama_thinking": thinking,
-        "ollama_num_ctx": num_ctx,
-    }
-
     with _lock:
+        # 先讀取現有設定（保留通知等其他欄位）
+        existing = _cache if _cache else _load_from_disk()
+        existing.update({
+            "provider": provider,
+            "model": model.strip(),
+            "ollama_base_url": (ollama_base_url or _DEFAULT["ollama_base_url"]).strip(),
+            "ollama_thinking": thinking,
+            "ollama_num_ctx": num_ctx,
+        })
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(new_settings, f, ensure_ascii=False, indent=2)
-        _cache = new_settings
-    return dict(new_settings)
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
 
 
 def settings_signature() -> str:

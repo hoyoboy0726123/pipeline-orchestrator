@@ -11,23 +11,25 @@ import '@xyflow/react/dist/style.css'
 
 import {
   Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap, Square,
-  Loader2, CheckCircle2, XCircle, Workflow, Terminal, X,
+  Loader2, CheckCircle2, XCircle, Workflow, Terminal, X, Hand,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Toaster } from 'sonner'
 
-import ScriptStepNode         from './_scriptNode'
-import SkillStepNode          from './_skillNode'
-import AiValidationNodeComponent from './_aiValidationNode'
-import ScriptConfigPanel      from './_scriptPanel'
-import SkillConfigPanel       from './_skillPanel'
-import AiValidationPanel      from './_aiValidationPanel'
+import ScriptStepNode              from './_scriptNode'
+import SkillStepNode               from './_skillNode'
+import AiValidationNodeComponent   from './_aiValidationNode'
+import HumanConfirmNodeComponent   from './_humanConfirmNode'
+import ScriptConfigPanel           from './_scriptPanel'
+import SkillConfigPanel            from './_skillPanel'
+import AiValidationPanel           from './_aiValidationPanel'
+import HumanConfirmPanel           from './_humanConfirmPanel'
 import Sidebar                from './_sidebar'
 import {
-  type AppNode, type StepData, type SkillData, type AiValidationData,
-  type ScriptNode, type SkillNode,
-  newStepData, newSkillData, newAiValidationData, stepsToFlow, flowToSteps,
-  stepsToYaml, parseYaml,
+  type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
+  type ScriptNode, type SkillNode, type HumanConfirmNode,
+  newStepData, newSkillData, newAiValidationData, newHumanConfirmData,
+  stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
 import { useWorkflowStore } from './_store'
 import {
@@ -43,6 +45,7 @@ const nodeTypes = {
   scriptStep: ScriptStepNode,
   skillStep: SkillStepNode,
   aiValidation: AiValidationNodeComponent,
+  humanConfirmation: HumanConfirmNodeComponent,
 }
 
 // ── Schedule Dialog ───────────────────────────────────────────────────────────
@@ -299,8 +302,12 @@ export default function PipelinePage() {
   const [showRunDialog, setShowRunDialog] = useState(false)
   const [recipeStatus, setRecipeStatus]   = useState<RecipeStatus | null>(null)
   const [running, setRunning]     = useState(false)
-  const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'success' | 'failed' | 'awaiting'>('idle')
+  const [runStatus, _setRunStatus] = useState<'idle' | 'running' | 'success' | 'failed' | 'awaiting'>('idle')
+  const runStatusRef = useRef(runStatus)
+  const setRunStatus = (v: typeof runStatus) => { runStatusRef.current = v; _setRunStatus(v) }
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
+  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm'>('failure')
+  const [awaitingMessage, setAwaitingMessage] = useState('')
   const [showRecipeConfirm, setShowRecipeConfirm] = useState(false)
   const [pendingRecipeRunId, setPendingRecipeRunId] = useState<string | null>(null)
   const [pendingRecipeCount, setPendingRecipeCount] = useState(0)
@@ -359,7 +366,15 @@ export default function PipelinePage() {
         if (active && !runIdRef.current) {
           runIdRef.current = active.run_id
           setRunning(true)
-          setRunStatus(active.status === 'awaiting_human' ? 'awaiting' : 'running')
+          if (active.status === 'awaiting_human') {
+            setRunStatus('awaiting')
+            setAwaitingRunId(active.run_id)
+            const isConfirm = (active as any).awaiting_type === 'human_confirm'
+            setAwaitingType(isConfirm ? 'confirm' : 'failure')
+            setAwaitingMessage((active as any).awaiting_message || '')
+          } else {
+            setRunStatus('running')
+          }
           setShowLog(true)
           toast.info(`偵測到排程執行中`)
           pollStatus(active.run_id)
@@ -434,6 +449,7 @@ export default function PipelinePage() {
   const miniMapNodeColor = useCallback((n: { type?: string }) => {
     if (n.type === 'aiValidation') return '#f59e0b'
     if (n.type === 'skillStep') return '#8b5cf6'
+    if (n.type === 'humanConfirmation') return '#10b981'
     return '#3b82f6'
   }, [])
 
@@ -541,6 +557,34 @@ export default function PipelinePage() {
     setSelectedId(id)
   }, [nodes, edges, selectedId, setNodes, setEdges])
 
+  // ── Add human confirmation node ──────────────────────────────────────────
+  const addHumanConfirm = useCallback(() => {
+    const id = `confirm-${Date.now()}`
+    const data = newHumanConfirmData(nodes.length)
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 320 : 100
+    const y = lastNode ? lastNode.position.y : 160
+
+    const newNode: AppNode = {
+      id, type: 'humanConfirmation',
+      position: { x, y },
+      data,
+    }
+    setNodes(ns => [...ns, newNode])
+
+    if (lastNode) {
+      const newEdge: Edge = {
+        id: `e-${lastNode.id}-${id}`,
+        source: lastNode.id,
+        target: id,
+        type: 'smoothstep',
+        style: { stroke: '#10b981', strokeWidth: 2 },
+      }
+      setEdges(es => [...es, newEdge])
+    }
+    setSelectedId(id)
+  }, [nodes, setNodes, setEdges])
+
   // ── Delete step（刪除任何節點時自動重新連線前後節點）──────────────────────────
   const deleteStep = useCallback((id: string) => {
     const inEdge  = edges.find(e => e.target === id)
@@ -583,6 +627,7 @@ export default function PipelinePage() {
       id: `e-${connection.source}-${connection.target}`,
       type: 'smoothstep',
       style: { stroke: '#6366f1', strokeWidth: 2 },
+      selectable: true,
     }
     setEdges(es => addEdge(edge, es))
   }, [setEdges])
@@ -604,7 +649,7 @@ export default function PipelinePage() {
     const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep')
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
-    const emptyStep = steps.find(s => !s.batch?.trim())
+    const emptyStep = steps.find(s => !s.batch?.trim() && !s.humanConfirm)
     if (emptyStep) {
       toast.error(`步驟「${emptyStep.name}」尚未設定${emptyStep.skillMode ? '任務描述' : '執行指令'}，請點擊該步驟方塊填入`)
       return
@@ -687,14 +732,32 @@ export default function PipelinePage() {
       useRunStatusStore.getState().setBulkStatus(statusMap)
       useRunStatusStore.getState().setEdgesAnimated(data.status === 'running')
 
-      // 等待人工決策
+      // 等待人工決策（繼續 polling，這樣 Telegram 確認後前端也能偵測到）
       if (data.status === 'awaiting_human') {
-        clearInterval(pollRef.current!)
-        setRunning(false)
-        setRunStatus('awaiting')
-        setAwaitingRunId(runId)
-        toast.warning('步驟執行失敗，請選擇處理方式', { duration: 0, id: 'awaiting' })
+        if (runStatusRef.current !== 'awaiting') {
+          // 首次進入 awaiting 才顯示 toast
+          setRunning(false)
+          setRunStatus('awaiting')
+          setAwaitingRunId(runId)
+          const isConfirm = data.awaiting_type === 'human_confirm'
+          setAwaitingType(isConfirm ? 'confirm' : 'failure')
+          setAwaitingMessage(data.awaiting_message || '')
+          toast[isConfirm ? 'info' : 'warning'](
+            isConfirm ? '✋ 等待人工確認' : '步驟執行失敗，請選擇處理方式',
+            { duration: 0, id: 'awaiting' }
+          )
+        }
         return
+      }
+      // 如果之前在 awaiting，現在狀態改變了（Telegram 確認了）→ 重新同步
+      if (runStatusRef.current === 'awaiting' && data.status !== 'awaiting_human') {
+        setRunStatus(data.status === 'running' ? 'running' : 'idle')
+        setRunning(data.status === 'running')
+        setAwaitingRunId(null)
+        setShowHintInput(false)
+        setHintText('')
+        toast.dismiss('awaiting')
+        if (data.status === 'running') toast.success('Pipeline 已恢復執行')
       }
 
       const done = data.status === 'completed' || data.status === 'failed' || data.status === 'aborted'
@@ -738,15 +801,33 @@ export default function PipelinePage() {
   }
 
   // 人工決策後繼續 polling
-  const handleDecision = async (decision: 'retry' | 'skip' | 'abort') => {
+  const [hintText, setHintText] = useState('')
+  const [showHintInput, setShowHintInput] = useState(false)
+
+  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint', hint?: string) => {
     if (!awaitingRunId) return
     try {
-      await resumePipeline(awaitingRunId, decision)
+      if (decision === 'abort') {
+        await abortPipeline(awaitingRunId)
+        setRunStatus('failed')
+        setRunning(false)
+        setAwaitingRunId(null)
+        runIdRef.current = null
+        toast.dismiss('awaiting')
+        toast.info('Pipeline 已中止')
+        if (pollRef.current) clearInterval(pollRef.current)
+        setShowHintInput(false)
+        setHintText('')
+        return
+      }
+      await resumePipeline(awaitingRunId, decision, hint)
       setRunStatus('running')
       setRunning(true)
       setAwaitingRunId(null)
       toast.dismiss('awaiting')
-      pollRef.current = setInterval(() => pollStatus(awaitingRunId), 1500)
+      setShowHintInput(false)
+      setHintText('')
+      // polling 已在持續中（awaiting 不停止 interval），無需重建
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '操作失敗')
     }
@@ -869,7 +950,8 @@ export default function PipelinePage() {
           onInit={onInit}
           minZoom={0.2}
           maxZoom={2}
-          deleteKeyCode="Delete"
+          deleteKeyCode={['Delete', 'Backspace']}
+          defaultEdgeOptions={{ selectable: true }}
         >
           {/* Dotted grid background */}
           <Background
@@ -909,25 +991,91 @@ export default function PipelinePage() {
               >
                 <Plus className="w-3.5 h-3.5" /> AI技能
               </button>
+              <button
+                onClick={addHumanConfirm}
+                title="新增人工確認節點（暫停等待確認後繼續）"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-emerald-200 rounded-xl text-sm text-emerald-600 hover:border-emerald-400 hover:bg-emerald-50 shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> 人工確認
+              </button>
             </div>
           </Panel>
         </ReactFlow>
 
         {/* Awaiting human decision banner */}
-        {runStatus === 'awaiting' && awaitingRunId && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-amber-50 border border-amber-200 rounded-2xl shadow-lg px-5 py-3 flex items-center gap-3">
-            <span className="text-amber-600 font-medium text-sm">⚠️ 步驟失敗，請選擇處理方式</span>
-            <button onClick={() => handleDecision('retry')} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">🔄 重試</button>
-            <button onClick={() => handleDecision('skip')} className="px-3 py-1.5 bg-gray-600 text-white rounded-lg text-xs font-medium hover:bg-gray-700">⏩ 跳過</button>
-            <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700">🛑 中止</button>
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'failure' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-amber-50 border border-amber-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[560px]">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-amber-600 font-medium text-sm whitespace-nowrap">⚠️ 步驟失敗，請選擇處理方式</span>
+              <div className="flex items-center gap-2 ml-auto">
+                <button onClick={() => handleDecision('retry')} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 whitespace-nowrap">🔄 重試</button>
+                <button onClick={() => setShowHintInput(!showHintInput)} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${showHintInput ? 'bg-purple-700 text-white' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>💬 補充指示</button>
+                <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+              </div>
+            </div>
+            {showHintInput && (
+              <div className="flex gap-2">
+                <input
+                  value={hintText}
+                  onChange={e => setHintText(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && hintText.trim()) handleDecision('retry_with_hint', hintText.trim()) }}
+                  placeholder="例如：改用 selenium、檢查 CSS selector…"
+                  className="flex-1 border border-amber-300 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-purple-400 bg-white"
+                  autoFocus
+                />
+                <button
+                  onClick={() => hintText.trim() && handleDecision('retry_with_hint', hintText.trim())}
+                  disabled={!hintText.trim()}
+                  className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50"
+                >送出</button>
+              </div>
+            )}
+          </div>
+        )}
+        {/* Human confirmation banner */}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'confirm' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-emerald-50 border border-emerald-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[560px]">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-emerald-700 font-medium text-sm whitespace-nowrap">✋ 等待人工確認</span>
+              <span className="text-emerald-600 text-xs max-w-[200px] truncate">{awaitingMessage}</span>
+              <div className="flex items-center gap-2 ml-auto">
+                <button onClick={() => handleDecision('continue')} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 whitespace-nowrap">✅ 繼續</button>
+                <button onClick={() => setShowHintInput(!showHintInput)} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${showHintInput ? 'bg-purple-700 text-white' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>💬 補充指示</button>
+                <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+              </div>
+            </div>
+            {showHintInput && (
+              <div className="flex gap-2">
+                <input
+                  value={hintText}
+                  onChange={e => setHintText(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && hintText.trim()) handleDecision('retry_with_hint', hintText.trim()) }}
+                  placeholder="補充指示後會重做上一步，例如：改抓 20 筆、用其他網站…"
+                  className="flex-1 border border-emerald-300 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-purple-400 bg-white"
+                  autoFocus
+                />
+                <button
+                  onClick={() => hintText.trim() && handleDecision('retry_with_hint', hintText.trim())}
+                  disabled={!hintText.trim()}
+                  className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50 whitespace-nowrap"
+                >送出</button>
+              </div>
+            )}
           </div>
         )}
 
         {/* Empty state */}
-        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep').length === 0 && <EmptyState onAdd={addScriptStep} />}
+        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation').length === 0 && <EmptyState onAdd={addScriptStep} />}
 
         {/* Node config panel */}
-        {selectedNode && selectedNode.type === 'aiValidation' ? (
+        {selectedNode && selectedNode.type === 'humanConfirmation' ? (
+          <HumanConfirmPanel
+            node={selectedNode as HumanConfirmNode}
+            onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
+            onClose={() => setSelectedId(null)}
+            onDelete={() => deleteStep(selectedNode.id)}
+          />
+        ) : selectedNode && selectedNode.type === 'aiValidation' ? (
           <AiValidationPanel
             data={selectedNode.data as AiValidationData}
             onUpdate={patch => updateAiNode(selectedNode.id, patch)}

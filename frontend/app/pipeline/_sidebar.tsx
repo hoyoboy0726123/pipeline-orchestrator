@@ -155,7 +155,7 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
 
   const [showChat, setShowChat] = useState(false)
   const [messages, setMessages] = useState<ChatMsg[]>([
-    { role: 'assistant', content: '你好！請告訴我你想自動化的工作流程，我會幫你產生 Pipeline YAML 設定。\n\n例如：「每天早上 9 點抓取財務報表，清洗資料後生成 Excel」' }
+    { role: 'assistant', content: '你好！請告訴我你想自動化的工作流程，我會幫你產生 Pipeline YAML 設定。\n\n**範例 1（AI 技能）**\n把 ~/data/report.xlsx（或上一步產生的資料）整理好，加上格線、自動換行，儲存到 ~/ai_output/formatted_report.xlsx\n\n**範例 2（Python 腳本串接）**\n第一步：執行 ~/scripts/fetch_data.py，輸出到 ~/ai_output/raw.csv\n第二步：執行 ~/scripts/analyze.py，讀取上一步的 csv，輸出到 ~/ai_output/result.xlsx' }
   ])
   const [input, setInput]     = useState('')
   const [loading, setLoading] = useState(false)
@@ -457,14 +457,14 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
             </div>
 
             {/* Input */}
-            <div className="p-2 border-t border-gray-100 flex gap-1.5">
-              <input
+            <div className="p-2 border-t border-gray-100 flex gap-1.5 items-end">
+              <textarea
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-                placeholder="描述你的工作流…"
+                placeholder="描述你的工作流…（Enter 換行）"
                 disabled={loading}
-                className="flex-1 border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 transition-colors disabled:bg-gray-50"
+                rows={2}
+                className="flex-1 border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 transition-colors disabled:bg-gray-50 resize-none"
               />
               <button
                 onClick={handleSend}
